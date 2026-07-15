@@ -1,0 +1,12 @@
+services:
+  instagram-cta:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+    ports:
+      - "127.0.0.1:18787:18787"
+    volumes:
+      - ./routes.json:/app/routes.json:ro
+      - ./state:/app/state

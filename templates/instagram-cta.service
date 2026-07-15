@@ -1,0 +1,14 @@
+[Unit]
+Description=Instagram CTA Kit
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/instagram-cta-kit
+ExecStart=/usr/bin/npm start
+Restart=on-failure
+RestartSec=5
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

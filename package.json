@@ -1,0 +1,47 @@
+{
+  "name": "instagram-cta-kit",
+  "version": "0.1.0",
+  "description": "Self-hosted Instagram comment and DM keyword automation using the official Meta API",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "instagram-cta": "./bin/instagram-cta.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "scripts",
+    "templates",
+    "skills",
+    ".env.example",
+    "routes.example.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node bin/instagram-cta.mjs start",
+    "doctor": "node bin/instagram-cta.mjs doctor",
+    "test": "node test/server.test.mjs && node test/poll.test.mjs && node test/poll-cursor.test.mjs && node test/follow-gate.test.mjs && node test/message-poll.test.mjs && node test/story-message.test.mjs && node test/hebrew-keyword.test.mjs && node test/english-locale.test.mjs && node test/pagination.test.mjs && node test/pending-freetext.test.mjs && node test/cli.test.mjs",
+    "validate:routes": "node bin/instagram-cta.mjs routes validate",
+    "pack:check": "npm pack --dry-run"
+  },
+  "keywords": [
+    "instagram",
+    "meta",
+    "automation",
+    "direct-message",
+    "lead-magnet",
+    "self-hosted"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dangogit/instagram-cta-kit.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dangogit/instagram-cta-kit/issues"
+  },
+  "homepage": "https://github.com/dangogit/instagram-cta-kit#readme"
+}

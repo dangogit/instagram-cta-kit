@@ -1,0 +1,22 @@
+{
+  "routes": [
+    {
+      "keyword": "GUIDE",
+      "campaign_id": "my-first-guide",
+      "guide_url": "https://example.com/guide",
+      "intro_text": "Thanks for your comment. Want me to send you the guide?",
+      "reply_text": "Here is the guide:\nhttps://example.com/guide\n\nLet me know if it helps.",
+      "public_reply_text": "Sent you a DM ✨",
+      "requires_follow": false
+    },
+    {
+      "keyword": "מדריך",
+      "campaign_id": "hebrew-guide",
+      "guide_url": "https://example.com/he/guide",
+      "intro_text": "קיבלתי את התגובה שלך. לשלוח לך את המדריך?",
+      "reply_text": "הנה המדריך:\nhttps://example.com/he/guide\n\nאשמח לשמוע אם הוא עזר.",
+      "public_reply_text": "שלחתי לך הודעה בפרטי ✨",
+      "requires_follow": false
+    }
+  ]
+}
