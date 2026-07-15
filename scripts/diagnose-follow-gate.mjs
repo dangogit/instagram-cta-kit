@@ -88,8 +88,10 @@ async function graphGet(path, params = {}) {
   const base = process.env.GRAPH_BASE_URL || "https://graph.instagram.com/v25.0";
   const url = new URL(`${base}/${path.replace(/^\//, "")}`);
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
-  url.searchParams.set("access_token", process.env.IG_ACCESS_TOKEN || "");
-  const response = await fetch(url);
+  const response = await fetch(url, {
+    headers: { "Authorization": `Bearer ${process.env.IG_ACCESS_TOKEN || ""}` },
+    signal: AbortSignal.timeout(10000),
+  });
   const text = await response.text();
   let data;
   try {

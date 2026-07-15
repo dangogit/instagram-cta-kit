@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -18,5 +25,12 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
+      - run: npm audit --omit=dev
       - run: npm test
+      - name: Smoke test generated configuration
+        run: |
+          home="$(mktemp -d)"
+          node bin/instagram-cta.mjs init --dir "$home" --locale en --mode polling
+          node bin/instagram-cta.mjs doctor --dir "$home"
+          node bin/instagram-cta.mjs routes validate --dir "$home"
       - run: npm run pack:check

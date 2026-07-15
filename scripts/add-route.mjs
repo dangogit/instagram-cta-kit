@@ -61,11 +61,20 @@ function intersects(a, b) {
   return b.some((item) => set.has(item));
 }
 
+function validHttpsUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && Boolean(url.hostname) && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+}
+
 if (!keywordArg || !guideUrl) usage();
 
 const keyword = normalizeKeyword(keywordArg);
 if (!/^[A-Z0-9\u0590-\u05ff]{2,30}$/.test(keyword)) throw new Error(`Bad keyword: ${keywordArg}`);
-if (!guideUrl.startsWith("https://")) throw new Error("Guide URL must start with https://");
+if (!validHttpsUrl(guideUrl)) throw new Error("Guide URL must be a valid https URL without embedded credentials");
 
 const campaignId = String(takeFlag("--campaign-id") || "").trim().toLowerCase();
 if (!/^[a-z0-9][a-z0-9._-]{1,99}$/.test(campaignId)) throw new Error("--campaign-id is required and must be a stable asset slug");
@@ -101,8 +110,8 @@ if (!Array.isArray(parsed.routes)) parsed.routes = [];
 
 for (const route of parsed.routes) {
   if (route.active === false) continue;
-  const existingKeyword = normalizeKeyword(route.keyword);
-  if (existingKeyword !== keyword) continue;
+  const existingKeywords = [route.keyword, ...(route.aliases || [])].map(normalizeKeyword);
+  if (!existingKeywords.includes(keyword)) continue;
   const existingMediaIds = routeMediaIds(route);
   if (existingMediaIds.length === 0 || mediaIds.length === 0 || intersects(existingMediaIds, mediaIds)) {
     throw new Error(`${keyword} already exists. Use media_ids only for non-overlapping post-specific routes.`);
@@ -127,5 +136,5 @@ if (followGate) {
 if (mediaIds.length) route.media_ids = mediaIds;
 
 parsed.routes.push(route);
-await writeFile(routesFile, `${JSON.stringify(parsed, null, 2)}\n`);
+await writeFile(routesFile, `${JSON.stringify(parsed, null, 2)}\n`, { mode: 0o600 });
 console.log(`added ${keyword} -> ${guideUrl}`);

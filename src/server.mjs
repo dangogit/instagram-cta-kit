@@ -6,6 +6,15 @@ import http from "node:http";
 
 const homeDir = resolve(process.env.INSTAGRAM_CTA_HOME || process.cwd());
 const locale = process.env.DEFAULT_LOCALE === "he" ? "he" : "en";
+
+function positiveInteger(value, fallback) {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function isPlaceholder(value) {
+  return !value || String(value).startsWith("replace-with-");
+}
 const copy = {
   en: {
     publicReply: "Sent you a DM ✨",
@@ -36,7 +45,7 @@ const copy = {
 }[locale];
 
 const env = {
-  port: Number(process.env.PORT || 18787),
+  port: positiveInteger(process.env.PORT, 18787),
   host: process.env.HOST || "127.0.0.1",
   verifyToken: process.env.VERIFY_TOKEN || "",
   appSecret: process.env.META_APP_SECRET || "",
@@ -50,20 +59,22 @@ const env = {
   defaultPublicReplyText: process.env.DEFAULT_PUBLIC_REPLY_TEXT || copy.publicReply,
   logWebhookContent: process.env.LOG_WEBHOOK_CONTENT === "1",
   pollEnabled: process.env.POLL_ENABLED === "1",
-  pollIntervalMs: Number(process.env.POLL_INTERVAL_MS || 60000),
-  pollMediaLimit: Number(process.env.POLL_MEDIA_LIMIT || 100),
-  pollCommentsLimit: Number(process.env.POLL_COMMENTS_LIMIT || 100),
-  pollConversationLimit: Number(process.env.POLL_CONVERSATION_LIMIT || 25),
-  pollMessagesLimit: Number(process.env.POLL_MESSAGES_LIMIT || 10),
-  pollMaxCommentPages: Number(process.env.POLL_MAX_COMMENT_PAGES || 20),
-  pollMaxConversationPages: Number(process.env.POLL_MAX_CONVERSATION_PAGES || 20),
-  pollMaxMessagePages: Number(process.env.POLL_MAX_MESSAGE_PAGES || 20),
+  maxWebhookBodyBytes: positiveInteger(process.env.MAX_WEBHOOK_BODY_BYTES, 1_048_576),
+  metaRequestTimeoutMs: positiveInteger(process.env.META_REQUEST_TIMEOUT_MS, 10_000),
+  pollIntervalMs: positiveInteger(process.env.POLL_INTERVAL_MS, 60000),
+  pollMediaLimit: positiveInteger(process.env.POLL_MEDIA_LIMIT, 100),
+  pollCommentsLimit: positiveInteger(process.env.POLL_COMMENTS_LIMIT, 100),
+  pollConversationLimit: positiveInteger(process.env.POLL_CONVERSATION_LIMIT, 25),
+  pollMessagesLimit: positiveInteger(process.env.POLL_MESSAGES_LIMIT, 10),
+  pollMaxCommentPages: positiveInteger(process.env.POLL_MAX_COMMENT_PAGES, 20),
+  pollMaxConversationPages: positiveInteger(process.env.POLL_MAX_CONVERSATION_PAGES, 20),
+  pollMaxMessagePages: positiveInteger(process.env.POLL_MAX_MESSAGE_PAGES, 20),
   initialPollSinceIso: process.env.POLL_SINCE_ISO || new Date().toISOString(),
   pollCursorFile: resolve(homeDir, process.env.POLL_CURSOR_FILE || "./state/poll-cursor.json"),
   messagePollCursorFile: resolve(homeDir, process.env.POLL_MESSAGE_CURSOR_FILE || "./state/message-poll-cursor.json"),
   followGateEnabled: process.env.FOLLOW_GATE_GUIDE_ENABLED === "1",
-  followGateIntervalMs: Number(process.env.FOLLOW_GATE_INTERVAL_MS || 600000),
-  followGateMaxAgeDays: Number(process.env.FOLLOW_GATE_MAX_AGE_DAYS || 14),
+  followGateIntervalMs: positiveInteger(process.env.FOLLOW_GATE_INTERVAL_MS, 600000),
+  followGateMaxAgeDays: positiveInteger(process.env.FOLLOW_GATE_MAX_AGE_DAYS, 14),
   attributionSecret: process.env.CTA_ATTRIBUTION_SECRET || (process.env.DRY_RUN === "1" ? "dry-run-attribution-secret" : ""),
   posthogToken: process.env.POSTHOG_PROJECT_TOKEN || "",
   posthogHost: process.env.POSTHOG_HOST || "",
@@ -82,14 +93,18 @@ const pollStatus = {
 
 function assertConfig() {
   const missing = [];
-  if (!env.verifyToken) missing.push("VERIFY_TOKEN");
-  if (!env.appSecret && !env.dryRun) missing.push("META_APP_SECRET");
-  if (!env.igUserId && !env.dryRun) missing.push("IG_USER_ID");
-  if (!env.accessToken && !env.dryRun) missing.push("IG_ACCESS_TOKEN");
-  if (!env.attributionSecret && !env.dryRun) missing.push("CTA_ATTRIBUTION_SECRET");
+  if (isPlaceholder(env.verifyToken)) missing.push("VERIFY_TOKEN");
+  if (!env.dryRun && isPlaceholder(env.appSecret)) missing.push("META_APP_SECRET");
+  if (!env.dryRun && isPlaceholder(env.igUserId)) missing.push("IG_USER_ID");
+  if (!env.dryRun && isPlaceholder(env.accessToken)) missing.push("IG_ACCESS_TOKEN");
+  if (!env.dryRun && isPlaceholder(env.attributionSecret)) missing.push("CTA_ATTRIBUTION_SECRET");
   if (missing.length) {
     throw new Error(`Missing required env: ${missing.join(", ")}`);
   }
+}
+
+function pollCredentialsConfigured() {
+  return !isPlaceholder(env.igUserId) && !isPlaceholder(env.accessToken);
 }
 
 async function loadRoutes() {
@@ -122,9 +137,43 @@ function normalizeList(value) {
 function readBody(req) {
   return new Promise((resolveBody, reject) => {
     const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
-    req.on("end", () => resolveBody(Buffer.concat(chunks)));
-    req.on("error", reject);
+    let bytes = 0;
+    let settled = false;
+
+    const cleanup = () => {
+      req.off("data", onData);
+      req.off("end", onEnd);
+      req.off("error", onError);
+    };
+    const onData = (chunk) => {
+      bytes += chunk.length;
+      if (bytes > env.maxWebhookBodyBytes) {
+        settled = true;
+        cleanup();
+        req.resume();
+        const error = new Error("webhook body too large");
+        error.statusCode = 413;
+        reject(error);
+        return;
+      }
+      chunks.push(chunk);
+    };
+    const onEnd = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolveBody(Buffer.concat(chunks));
+    };
+    const onError = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+
+    req.on("data", onData);
+    req.on("end", onEnd);
+    req.on("error", onError);
   });
 }
 
@@ -220,6 +269,21 @@ function matchRoute(text, routes) {
 
 function routeKeywords(route) {
   return [route.keyword, ...(route.aliases || [])];
+}
+
+function findRouteByKeywordAndMedia(routes, keyword, mediaId) {
+  const normalizedKeyword = String(keyword || "").trim().toUpperCase();
+  const matches = routes.filter((route) => routeKeywords(route).includes(normalizedKeyword));
+  if (!matches.length) return null;
+
+  if (mediaId) {
+    const specific = matches.filter((route) => route.mediaIds.includes(String(mediaId)));
+    if (specific.length === 1) return specific[0];
+    if (specific.length > 1) return null;
+  }
+
+  const global = matches.filter((route) => route.mediaIds.length === 0);
+  return global.length === 1 ? global[0] : null;
 }
 
 function matchRouteTypo(tokens, routes) {
@@ -347,7 +411,7 @@ function findLatestFollowUpRoute(message, routes, pendingFollowUpsByUser) {
   if (!isFollowUpText(message.text)) return null;
   const pending = pendingFollowUpsByUser.get(message.senderId);
   if (!pending) return null;
-  const route = routes.find((candidate) => candidate.keyword === pending.keyword);
+  const route = findRouteByKeywordAndMedia(routes, pending.keyword, pending.mediaId);
   return route ? { route, mediaId: pending.mediaId } : null;
 }
 
@@ -427,6 +491,7 @@ async function lookupFollowerState(comment) {
         headers: {
           "Authorization": `Bearer ${env.accessToken}`,
         },
+        signal: AbortSignal.timeout(env.metaRequestTimeoutMs),
       });
       const responseText = await response.text();
       let data;
@@ -453,12 +518,28 @@ async function resolveFollowerState(route, comment) {
   return { ...comment, followerState };
 }
 
+async function fetchMetaPost(url, options) {
+  let response;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    response = await fetch(url, {
+      ...options,
+      signal: AbortSignal.timeout(env.metaRequestTimeoutMs),
+    });
+    if (response.ok || (response.status !== 429 && response.status < 500) || attempt === 2) {
+      return response;
+    }
+    await response.body?.cancel();
+    await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+  }
+  return response;
+}
+
 async function sendMessageBody(url, body, fallbackBody = null) {
   if (env.dryRun) {
     return { dry_run: true, url, body };
   }
   const send = async (requestBody) => {
-    const response = await fetch(url, {
+    const response = await fetchMetaPost(url, {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${env.accessToken}`,
@@ -528,7 +609,7 @@ async function sendPublicCommentReply(comment, text) {
   if (env.dryRun) {
     return { dry_run: true, url, body };
   }
-  const response = await fetch(url, {
+  const response = await fetchMetaPost(url, {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${env.accessToken}`,
@@ -550,9 +631,9 @@ async function sendPublicCommentReply(comment, text) {
 }
 
 async function recordEvent(event) {
-  await mkdir(dirname(env.stateFile), { recursive: true });
+  await mkdir(dirname(env.stateFile), { recursive: true, mode: 0o700 });
   const recorded = { ...event, at: new Date().toISOString() };
-  await appendFile(env.stateFile, `${JSON.stringify(recorded)}\n`);
+  await appendFile(env.stateFile, `${JSON.stringify(recorded)}\n`, { mode: 0o600 });
   if (event.funnel_event) await capturePosthogEvent(event.funnel_event, recorded);
 }
 
@@ -594,7 +675,7 @@ async function recordWebhookReceipt(payload, comments, messages) {
       if (change.field) changeFields.push(change.field);
     }
   }
-  await mkdir(dirname(env.webhookLogFile), { recursive: true });
+  await mkdir(dirname(env.webhookLogFile), { recursive: true, mode: 0o700 });
   const content = env.logWebhookContent ? {
     comments: comments.map((comment) => ({
       comment_id: comment.commentId,
@@ -618,12 +699,12 @@ async function recordWebhookReceipt(payload, comments, messages) {
     comment_count: comments.length,
     message_count: messages.length,
     ...content,
-  })}\n`);
+  })}\n`, { mode: 0o600 });
 }
 
 async function recordWebhookAttempt(status, body, req) {
   const signature = req.headers["x-hub-signature-256"] || req.headers["x-hub-signature"] || "";
-  await mkdir(dirname(env.webhookLogFile), { recursive: true });
+  await mkdir(dirname(env.webhookLogFile), { recursive: true, mode: 0o700 });
   await appendFile(env.webhookLogFile, `${JSON.stringify({
     at: new Date().toISOString(),
     status,
@@ -631,7 +712,7 @@ async function recordWebhookAttempt(status, body, req) {
     signature_scheme: String(signature).split("=")[0] || null,
     signature_length: String(signature).length,
     user_agent: req.headers["user-agent"] || null,
-  })}\n`);
+  })}\n`, { mode: 0o600 });
 }
 
 async function readStateEvents() {
@@ -698,7 +779,15 @@ function readPendingFollowUpsFromEvents(events) {
   for (const event of events) {
     const key = pendingKey(event);
     if (!key) continue;
-    if (event.follower_state === true || event.status === "follow_gate_guide_sent") {
+    if (event.status === "follow_gate_guide_sent" || event.funnel_event === "cta_guide_delivered") {
+      pending.delete(key);
+      continue;
+    }
+    if (event.funnel_event === "cta_conversation_started" && event.keyword) {
+      pending.set(key, { keyword: event.keyword });
+      continue;
+    }
+    if (event.follower_state === true && event.status !== "sent") {
       pending.delete(key);
       continue;
     }
@@ -713,7 +802,15 @@ function readPendingFollowUpsByUserFromEvents(events) {
   const pending = new Map();
   for (const event of events) {
     if (!event.from_id) continue;
-    if (event.follower_state === true || event.status === "follow_gate_guide_sent") {
+    if (event.status === "follow_gate_guide_sent" || event.funnel_event === "cta_guide_delivered") {
+      pending.delete(String(event.from_id));
+      continue;
+    }
+    if (event.funnel_event === "cta_conversation_started" && event.keyword) {
+      pending.set(String(event.from_id), { keyword: event.keyword, mediaId: event.media_id || null });
+      continue;
+    }
+    if (event.follower_state === true && event.status !== "sent") {
       pending.delete(String(event.from_id));
       continue;
     }
@@ -783,7 +880,11 @@ function readKnownCommentRoutesFromEvents(events) {
 function readHandledMessageIdsFromEvents(events) {
   const handled = new Set();
   for (const event of events) {
-    if (event.message_id && String(event.status || "").startsWith("message_")) {
+    if (
+      event.message_id
+      && String(event.status || "").startsWith("message_")
+      && event.status !== "message_error"
+    ) {
       handled.add(String(event.message_id));
     }
   }
@@ -794,7 +895,11 @@ function readDeliveredGuideKeysFromEvents(events) {
   const delivered = new Set();
   for (const event of events) {
     if (!event.from_id || !event.media_id || !event.keyword) continue;
-    if (event.status === "follow_gate_guide_sent" || event.follower_state === true) {
+    if (
+      event.status === "follow_gate_guide_sent"
+      || event.funnel_event === "cta_guide_delivered"
+      || (event.status === "message_sent" && event.follower_state === true)
+    ) {
       delivered.add(`${event.from_id}:${event.media_id}:${event.keyword}`);
     }
   }
@@ -816,6 +921,14 @@ async function readDeliveryState() {
   return readDeliveryStateFromEvents(await readStateEvents());
 }
 
+let processingChain = Promise.resolve();
+
+function serializeProcessing(task) {
+  const run = processingChain.then(task, task);
+  processingChain = run.catch(() => {});
+  return run;
+}
+
 async function handlePost(req, res) {
   const body = await readBody(req);
   if (!verifySignature(body, req.headers["x-hub-signature-256"])) {
@@ -833,15 +946,21 @@ async function handlePost(req, res) {
     return;
   }
 
-  const routes = await loadRoutes();
   const comments = extractComments(payload);
   const messages = extractMessages(payload);
   await recordWebhookReceipt(payload, comments, messages);
-  const commentResults = await processComments(comments, routes);
-  const messageResults = await processMessages(messages, routes);
+  const { commentResults, messageResults } = await serializeProcessing(async () => {
+    const routes = await loadRoutes();
+    return {
+      commentResults: await processComments(comments, routes),
+      messageResults: await processMessages(messages, routes),
+    };
+  });
 
-  res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ ok: true, results: [...commentResults, ...messageResults], comments: commentResults, messages: messageResults }));
+  const results = [...commentResults, ...messageResults];
+  const failed = results.some((result) => String(result.status || "").includes("error"));
+  res.writeHead(failed ? 503 : 200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ ok: !failed, results, comments: commentResults, messages: messageResults }));
 }
 
 export async function processComments(comments, routes = null) {
@@ -913,6 +1032,11 @@ export async function processComments(comments, routes = null) {
       }
     }
 
+    if (dmError) {
+      results.push({ commentId: resolvedComment.commentId, keyword: route.keyword, status: "dm_error" });
+      continue;
+    }
+
     let publicReply = { skipped_duplicate: true };
     if (!delivery.publicSent) {
       try {
@@ -929,28 +1053,12 @@ export async function processComments(comments, routes = null) {
         results.push({
           commentId: resolvedComment.commentId,
           keyword: route.keyword,
-          status: dmError ? "dm_error_public_reply_error" : "public_reply_error",
+          status: "public_reply_error",
         });
         continue;
       }
       delivery.publicSent = true;
       deliveryState.set(handledKey, delivery);
-      if (dmError) {
-        await recordEvent({
-          status: "public_reply_sent",
-          keyword: route.keyword,
-          comment_id: resolvedComment.commentId,
-          media_id: resolvedComment.mediaId,
-          from_id: resolvedComment.fromId,
-          follower_state: resolvedComment.followerState,
-          public_reply: publicReply,
-        });
-      }
-    }
-
-    if (dmError) {
-      results.push({ commentId: resolvedComment.commentId, keyword: route.keyword, status: "dm_error_public_sent" });
-      continue;
     }
 
     await recordEvent({
@@ -975,7 +1083,7 @@ export async function processComments(comments, routes = null) {
 function routeFromMessage(message, routes, pendingFollowUpsByUser) {
   const parsed = parseQuickReplyPayload(message.payload);
   if (["CTA_WANTS_GUIDE", "CTA_FOLLOWED"].includes(parsed.action) && parsed.keyword) {
-    const route = routes.find((candidate) => candidate.keyword === parsed.keyword);
+    const route = findRouteByKeywordAndMedia(routes, parsed.keyword, parsed.mediaId);
     return route ? { route, mediaId: parsed.mediaId, askFirst: false, source: "quick_reply" } : null;
   }
   const followUp = findLatestFollowUpRoute(message, routes, pendingFollowUpsByUser);
@@ -1005,7 +1113,10 @@ function routeFromMessage(message, routes, pendingFollowUpsByUser) {
 function matchDirectMessageRoute(text, routes) {
   const tokens = keywordTokens(text);
   if (tokens.length !== 1) return null;
-  return matchRoute(tokens[0], routes);
+  const exact = routes.filter((route) => routeKeywords(route).includes(tokens[0]));
+  if (exact.length === 1) return exact[0];
+  if (exact.length > 1) return null;
+  return matchRouteTypo(tokens, routes);
 }
 
 function storyIdFromMessage(message) {
@@ -1074,7 +1185,6 @@ export async function processMessages(messages, routes = null) {
           message_id: message.messageId,
           from_id: message.senderId,
           payload: message.payload,
-          text: message.text,
         });
         results.push({ messageId: message.messageId, status: "ignored" });
       }
@@ -1131,7 +1241,6 @@ export async function processMessages(messages, routes = null) {
           message_id: message.messageId,
           from_id: message.senderId,
           payload: message.payload,
-          text: message.text,
           reason: "non_follower_prompt_capped",
           keyword: route.keyword,
         });
@@ -1207,7 +1316,7 @@ export async function processPendingFollowGate(routes = null) {
   }
 
   for (const item of latestByUser.values()) {
-    const route = activeRoutes.find((candidate) => candidate.keyword === item.keyword);
+    const route = findRouteByKeywordAndMedia(activeRoutes, item.keyword, item.media_id);
     if (!route?.requiresFollow) continue;
     const comment = {
       igUserId: env.igUserId,
@@ -1275,7 +1384,7 @@ export function createServer() {
     try {
       const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
       if (req.method === "GET" && url.pathname === "/webhook") return handleVerify(req, res, url);
-      if (req.method === "POST" && url.pathname === "/webhook") return handlePost(req, res);
+      if (req.method === "POST" && url.pathname === "/webhook") return await handlePost(req, res);
       if (req.method === "GET" && url.pathname === "/health") {
         const deliveryErrors = summarizeRecentDeliveryErrors(await readStateEvents());
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -1283,6 +1392,7 @@ export function createServer() {
           ok: true,
           dry_run: env.dryRun,
           poll_enabled: env.pollEnabled,
+          poll_configured: pollCredentialsConfigured(),
           poll_interval_ms: env.pollIntervalMs,
           poll_since_iso: pollStatus.sinceIso,
           poll_last_run_at: pollStatus.lastRunAt,
@@ -1300,8 +1410,12 @@ export function createServer() {
       }
       res.writeHead(404).end("not found");
     } catch (error) {
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: false, error: error.message }));
+      const statusCode = Number.isInteger(error.statusCode) ? error.statusCode : 500;
+      res.writeHead(statusCode, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        ok: false,
+        error: statusCode === 500 ? "internal error" : error.message,
+      }));
     }
   });
 }
@@ -1311,8 +1425,12 @@ async function graphGet(path, params = {}) {
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
   }
-  url.searchParams.set("access_token", env.accessToken);
-  const response = await fetch(url);
+  const response = await fetch(url, {
+    headers: {
+      "Authorization": `Bearer ${env.accessToken}`,
+    },
+    signal: AbortSignal.timeout(env.metaRequestTimeoutMs),
+  });
   const data = await response.json();
   if (!response.ok) {
     throw new Error(`Meta poll failed ${response.status}: ${JSON.stringify(data)}`);
@@ -1376,14 +1494,22 @@ async function readMessagePollSinceIso() {
 
 async function writePollCursor(sinceIso) {
   if (process.env.POLL_SINCE_ISO) return;
-  await mkdir(dirname(env.pollCursorFile), { recursive: true });
-  await writeFile(env.pollCursorFile, `${JSON.stringify({ since_iso: sinceIso, updated_at: new Date().toISOString() })}\n`);
+  await mkdir(dirname(env.pollCursorFile), { recursive: true, mode: 0o700 });
+  await writeFile(
+    env.pollCursorFile,
+    `${JSON.stringify({ since_iso: sinceIso, updated_at: new Date().toISOString() })}\n`,
+    { mode: 0o600 },
+  );
 }
 
 async function writeMessagePollCursor(sinceIso) {
   if (process.env.POLL_SINCE_ISO) return;
-  await mkdir(dirname(env.messagePollCursorFile), { recursive: true });
-  await writeFile(env.messagePollCursorFile, `${JSON.stringify({ since_iso: sinceIso, updated_at: new Date().toISOString() })}\n`);
+  await mkdir(dirname(env.messagePollCursorFile), { recursive: true, mode: 0o700 });
+  await writeFile(
+    env.messagePollCursorFile,
+    `${JSON.stringify({ since_iso: sinceIso, updated_at: new Date().toISOString() })}\n`,
+    { mode: 0o600 },
+  );
 }
 
 function isNewEnough(comment, sinceIso) {
@@ -1495,10 +1621,15 @@ export async function pollOnce() {
   comments.sort((a, b) => commentTime(a) - commentTime(b));
   const conversations = await fetchRecentConversations(messageSinceIso);
   const messages = messagesFromPolledConversations(conversations, messageSinceIso);
-  const commentResults = await processComments(comments);
-  const messageResults = await processMessages(messages);
-  await writePollCursor(scanStartedAt);
-  await writeMessagePollCursor(scanStartedAt);
+  const { commentResults, messageResults } = await serializeProcessing(async () => {
+    const results = {
+      commentResults: await processComments(comments),
+      messageResults: await processMessages(messages),
+    };
+    await writePollCursor(scanStartedAt);
+    await writeMessagePollCursor(scanStartedAt);
+    return results;
+  });
   pollStatus.lastRunAt = new Date().toISOString();
   pollStatus.lastError = null;
   pollStatus.sinceIso = scanStartedAt;
@@ -1521,7 +1652,7 @@ function startPollLoop() {
       console.log(`instagram poll scanned ${pollStatus.mediaCount} media, ${pollStatus.commentCount} comments, ${results.length} results`);
       if (env.followGateEnabled && Date.now() - lastFollowGateRunAt >= env.followGateIntervalMs) {
         lastFollowGateRunAt = Date.now();
-        const followGateResults = await processPendingFollowGate();
+        const followGateResults = await serializeProcessing(() => processPendingFollowGate());
         pollStatus.followGateResultCount = followGateResults.length;
         console.log(`instagram follow gate guide-only checked ${followGateResults.length} pending users`);
       }
@@ -1542,7 +1673,11 @@ export function startServer() {
   const server = createServer();
   server.listen(env.port, env.host, () => {
     console.log(`instagram-cta listening on http://${env.host}:${env.port}`);
-    if (env.pollEnabled) startPollLoop();
+    if (env.pollEnabled && pollCredentialsConfigured()) {
+      startPollLoop();
+    } else if (env.pollEnabled) {
+      console.log("instagram polling paused until IG_USER_ID and IG_ACCESS_TOKEN are configured");
+    }
   });
   return server;
 }

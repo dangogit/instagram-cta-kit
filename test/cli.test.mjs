@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -17,6 +17,8 @@ assert.match(env, /DEFAULT_LOCALE=he/);
 assert.match(env, /POLL_ENABLED=1/);
 assert.match(env, /DRY_RUN=1/);
 assert.doesNotMatch(env, /replace-with-a-random-webhook-verify-token/);
+assert.equal((await stat(join(home, ".env"))).mode & 0o777, 0o600);
+assert.equal((await stat(join(home, "routes.json"))).mode & 0o777, 0o644);
 
 const routes = JSON.parse(await readFile(join(home, "routes.json"), "utf8"));
 assert.equal(routes.routes.length, 2);
@@ -45,5 +47,31 @@ const added = updated.routes.find((route) => route.keyword === "TEST");
 assert.equal(added.campaign_id, "test-guide");
 assert.equal(added.requires_follow, undefined);
 assert.match(added.reply_text, /https:\/\/example\.com\/test/);
+
+const badUrl = spawnSync(process.execPath, [
+  cli,
+  "route",
+  "add",
+  "BADURL",
+  "https://user:password@example.com/guide",
+  "--dir",
+  home,
+  "--campaign-id",
+  "bad-url",
+], { encoding: "utf8" });
+assert.notEqual(badUrl.status, 0);
+assert.match(badUrl.stderr, /valid https URL without embedded credentials/);
+
+updated.routes.push({
+  keyword: "ALIASROUTE",
+  aliases: ["TEST"],
+  campaign_id: "alias-collision",
+  guide_url: "https://example.com/alias",
+  reply_text: "Alias: https://example.com/alias",
+});
+await writeFile(join(home, "routes.json"), `${JSON.stringify(updated, null, 2)}\n`);
+const aliasCollision = spawnSync(process.execPath, [cli, "routes", "validate", "--dir", home], { encoding: "utf8" });
+assert.notEqual(aliasCollision.status, 0);
+assert.match(aliasCollision.stderr, /duplicate keyword or alias/);
 
 console.log("cli.test.mjs passed");

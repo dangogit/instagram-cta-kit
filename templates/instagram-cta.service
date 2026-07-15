@@ -5,7 +5,7 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/instagram-cta-kit
-ExecStart=/usr/bin/npm start
+ExecStart=REPLACE_WITH_NODE_PATH /opt/instagram-cta-kit/bin/instagram-cta.mjs start --dir /opt/instagram-cta-kit
 Restart=on-failure
 RestartSec=5
 Environment=NODE_ENV=production

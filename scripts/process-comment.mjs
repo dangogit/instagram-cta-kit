@@ -7,9 +7,10 @@ const args = process.argv.slice(2);
 
 function usage() {
   console.error(`Usage:
-  npm run process:comment -- COMMENT_ID --media-id MEDIA_ID [--send]
+  npm run process:comment -- COMMENT_ID --media-id MEDIA_ID [--send] [--show-content]
 
-Default is dry-run. Add --send only for an approved real Instagram test comment.`);
+Default is dry-run with sanitized output. Add --send only for an approved real Instagram test comment.
+Add --show-content only when displaying the comment text and username is appropriate.`);
   process.exit(1);
 }
 
@@ -53,6 +54,7 @@ async function loadEnvFile(path = ".env") {
 const commentId = args.shift();
 const mediaId = takeFlag("--media-id");
 const send = hasFlag("--send");
+const showContent = hasFlag("--show-content");
 if (!commentId || !mediaId || args.length) usage();
 
 await loadEnvFile();
@@ -72,8 +74,10 @@ if (!accessToken || !igUserId) throw new Error("Missing IG_ACCESS_TOKEN or IG_US
 async function graphGet(path, params = {}) {
   const url = new URL(`${graphBaseUrl}/${path.replace(/^\//, "")}`);
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, String(value));
-  url.searchParams.set("access_token", accessToken);
-  const response = await fetch(url);
+  const response = await fetch(url, {
+    headers: { "Authorization": `Bearer ${accessToken}` },
+    signal: AbortSignal.timeout(10000),
+  });
   const data = await response.json();
   if (!response.ok) {
     throw new Error(`Meta read failed ${response.status}: ${JSON.stringify(data)}`);
@@ -102,9 +106,11 @@ console.log(JSON.stringify({
   mode: send ? "send" : "dry-run",
   comment: {
     id: comment.id,
-    text: comment.text,
-    username: comment.username || comment.from?.username || null,
     timestamp: comment.timestamp || null,
+    ...(showContent ? {
+      text: comment.text,
+      username: comment.username || comment.from?.username || null,
+    } : {}),
   },
   results,
 }, null, 2));

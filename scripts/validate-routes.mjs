@@ -24,6 +24,19 @@ function intersects(a, b) {
   return b.some((item) => set.has(item));
 }
 
+function keywords(route) {
+  return [route.keyword, ...(route.aliases || [])].map(normalizeKeyword).filter(Boolean);
+}
+
+function validHttpsUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && Boolean(url.hostname) && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+}
+
 for (const [index, route] of routes.entries()) {
   const keyword = normalizeKeyword(route.keyword);
   if (!/^[A-Z0-9֐-׿]{2,30}$/.test(keyword)) errors.push(`routes[${index}] bad keyword: ${route.keyword}`);
@@ -37,7 +50,7 @@ for (const [index, route] of routes.entries()) {
     const normalizedAlias = normalizeKeyword(alias);
     if (!/^[A-Z0-9֐-׿]{2,30}$/.test(normalizedAlias)) errors.push(`${keyword} bad alias: ${alias}`);
   }
-  if (!route.guide_url?.startsWith("https://")) errors.push(`${keyword} guide_url must be https`);
+  if (!validHttpsUrl(route.guide_url)) errors.push(`${keyword} guide_url must be a valid https URL without embedded credentials`);
   if (!String(route.reply_text || "").includes(route.guide_url || "__missing__")) {
     if (legacyRoute) warnings.push(`${keyword} legacy reply_text has no attributable guide URL`);
     else errors.push(`${keyword} reply_text must contain guide_url for attribution replacement`);
@@ -58,13 +71,16 @@ for (const [index, route] of routes.entries()) {
 for (let i = 0; i < routes.length; i += 1) {
   const a = routes[i];
   const ka = normalizeKeyword(a.keyword);
+  const keywordsA = keywords(a);
   const mediaA = mediaIds(a);
   for (let j = i + 1; j < routes.length; j += 1) {
     const b = routes[j];
     const kb = normalizeKeyword(b.keyword);
+    const keywordsB = keywords(b);
     const mediaB = mediaIds(b);
-    if (ka === kb && (mediaA.length === 0 || mediaB.length === 0 || intersects(mediaA, mediaB))) {
-      errors.push(`${ka} duplicate keyword needs non-overlapping media_ids`);
+    const collisions = keywordsA.filter((keyword) => keywordsB.includes(keyword));
+    if (collisions.length && (mediaA.length === 0 || mediaB.length === 0 || intersects(mediaA, mediaB))) {
+      errors.push(`${ka}/${kb} duplicate keyword or alias (${collisions.join(", ")}) needs non-overlapping media_ids`);
     }
     if (ka !== kb && (ka.includes(kb) || kb.includes(ka))) {
       warnings.push(`${ka} overlaps ${kb} by substring, exact token matcher required`);
@@ -75,7 +91,17 @@ for (let i = 0; i < routes.length; i += 1) {
 if (process.env.CHECK_GUIDES === "1") {
   for (const route of routes) {
     const keyword = normalizeKeyword(route.keyword);
-    const response = await fetch(route.guide_url, { method: "HEAD" });
+    let response = await fetch(route.guide_url, {
+      method: "HEAD",
+      signal: AbortSignal.timeout(8000),
+    });
+    if (response.status === 405) {
+      response = await fetch(route.guide_url, {
+        method: "GET",
+        signal: AbortSignal.timeout(8000),
+      });
+      await response.body?.cancel();
+    }
     if (!response.ok) errors.push(`${keyword} guide_url returned ${response.status}`);
   }
 }

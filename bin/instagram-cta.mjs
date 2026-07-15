@@ -2,7 +2,7 @@
 
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { access, copyFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -48,10 +48,10 @@ Usage:
   instagram-cta start [--dir PATH]
 
 Examples:
-  npx instagram-cta-kit init --locale en --mode polling
-  npx instagram-cta-kit doctor
-  npx instagram-cta-kit route add GUIDE https://example.com/guide --campaign-id first-guide
-  npx instagram-cta-kit start
+  npx github:dangogit/instagram-cta-kit init --locale en --mode polling
+  npx github:dangogit/instagram-cta-kit doctor
+  npx github:dangogit/instagram-cta-kit route add GUIDE https://example.com/guide --campaign-id first-guide
+  npx github:dangogit/instagram-cta-kit start
 `);
 }
 
@@ -73,6 +73,8 @@ ROUTES_FILE=./routes.json
 STATE_FILE=./state/events.jsonl
 WEBHOOK_LOG_FILE=./state/webhooks.jsonl
 LOG_WEBHOOK_CONTENT=0
+MAX_WEBHOOK_BODY_BYTES=1048576
+META_REQUEST_TIMEOUT_MS=10000
 CTA_ATTRIBUTION_SECRET=${randomBytes(32).toString("hex")}
 
 POLL_ENABLED=${mode === "polling" ? "1" : "0"}
@@ -105,7 +107,7 @@ async function init() {
   if (!['polling', 'webhook'].includes(mode)) fail("--mode must be polling or webhook");
   if (args.length) fail(`unknown arguments: ${args.join(" ")}`);
 
-  await mkdir(resolve(home, "state"), { recursive: true });
+  await mkdir(resolve(home, "state"), { recursive: true, mode: 0o700 });
   const envPath = resolve(home, ".env");
   const routesPath = resolve(home, "routes.json");
   if (!force) {
@@ -121,6 +123,7 @@ async function init() {
 
   await writeFile(envPath, renderEnv({ locale, mode }), { mode: 0o600 });
   await copyFile(resolve(packageRoot, "routes.example.json"), routesPath);
+  await chmod(routesPath, 0o644);
   console.log(`Created Instagram CTA config in ${home}`);
   console.log("Next: edit .env, edit routes.json, then run instagram-cta doctor");
 }
@@ -141,9 +144,10 @@ async function doctor() {
   add("Node.js", Number(process.versions.node.split(".")[0]) >= 20, process.versions.node);
   add(".env", Object.keys(loaded).length > 0, envPath);
   const dryRun = process.env.DRY_RUN === "1";
-  for (const key of ["META_APP_SECRET", "IG_USER_ID", "IG_ACCESS_TOKEN", "CTA_ATTRIBUTION_SECRET"]) {
+  for (const key of ["VERIFY_TOKEN", "META_APP_SECRET", "IG_USER_ID", "IG_ACCESS_TOKEN", "CTA_ATTRIBUTION_SECRET"]) {
     const configured = !isPlaceholder(process.env[key]);
-    add(key, dryRun || configured, configured ? "configured" : dryRun ? "placeholder allowed in dry run" : "missing");
+    const allowedPlaceholder = dryRun && key !== "VERIFY_TOKEN";
+    add(key, configured || allowedPlaceholder, configured ? "configured" : allowedPlaceholder ? "placeholder allowed in dry run" : "missing");
   }
 
   const routesPath = resolve(home, process.env.ROUTES_FILE || "routes.json");
@@ -170,7 +174,7 @@ async function doctor() {
   });
   add("route validation", validation.status === 0, validation.status === 0 ? "passed" : "failed");
 
-  if (live && !dryRun && !isPlaceholder(process.env.IG_ACCESS_TOKEN) && !isPlaceholder(process.env.IG_USER_ID)) {
+  if (live && !isPlaceholder(process.env.IG_ACCESS_TOKEN) && !isPlaceholder(process.env.IG_USER_ID)) {
     try {
       const base = (process.env.GRAPH_BASE_URL || "https://graph.instagram.com/v25.0").replace(/\/$/, "");
       const response = await fetch(`${base}/${encodeURIComponent(process.env.IG_USER_ID)}?fields=id,username`, {

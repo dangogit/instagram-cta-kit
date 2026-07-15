@@ -7,6 +7,14 @@ services:
       HOST: 0.0.0.0
     ports:
       - "127.0.0.1:18787:18787"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     volumes:
       - ./routes.json:/app/routes.json:ro
-      - ./state:/app/state
+      - instagram-cta-state:/app/state
+
+volumes:
+  instagram-cta-state:

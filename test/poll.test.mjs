@@ -118,7 +118,7 @@ const { pollOnce, processMessages } = await import("../src/server.mjs");
 const first = await pollOnce();
 assert.deepEqual(first, [
   { commentId: "comment-1", keyword: "AGENT", status: "sent" },
-  { commentId: "comment-dm-fail", keyword: "AGENT", status: "dm_error_public_sent" },
+  { commentId: "comment-dm-fail", keyword: "AGENT", status: "dm_error" },
   { commentId: "comment-followed", keyword: "AGENT", status: "sent" },
 ]);
 
@@ -137,7 +137,7 @@ assert.deepEqual(followUpDmCall.body.message.quick_replies, [
   { content_type: "text", title: "סיימתי", payload: "CTA_DONE" },
 ]);
 assert.equal(calls.filter((call) => call.path.endsWith("/comment-1/replies")).length, 1);
-assert.equal(calls.filter((call) => call.path.endsWith("/comment-dm-fail/replies")).length, 1);
+assert.equal(calls.filter((call) => call.path.endsWith("/comment-dm-fail/replies")).length, 0);
 assert.equal(calls.filter((call) => call.path.endsWith("/comment-followed/replies")).length, 1);
 
 const messageResult = await processMessages([
@@ -213,16 +213,16 @@ assert.match(state, /message-followed/);
 assert.match(state, /message-still-not-following/);
 assert.match(state, /message-lookup-throws/);
 assert.match(state, /"status":"dm_error"/);
-assert.match(state, /"status":"public_reply_sent"/);
+assert.doesNotMatch(state, /"status":"public_reply_sent"/);
 assert.doesNotMatch(state, /comment-old/);
 
 const second = await pollOnce();
 assert.deepEqual(second, [
   { commentId: "comment-1", keyword: "AGENT", status: "skipped_duplicate" },
-  { commentId: "comment-dm-fail", keyword: "AGENT", status: "dm_error_public_sent" },
+  { commentId: "comment-dm-fail", keyword: "AGENT", status: "dm_error" },
   { commentId: "comment-followed", keyword: "AGENT", status: "skipped_duplicate" },
 ]);
-assert.equal(calls.filter((call) => call.path.endsWith("/1789/messages")).length, 7);
+assert.equal(calls.filter((call) => call.path.endsWith("/1789/messages")).length, 11);
 assert.equal(calls.filter((call) => call.path.endsWith("/comment-1/replies")).length, 1);
-assert.equal(calls.filter((call) => call.path.endsWith("/comment-dm-fail/replies")).length, 1);
+assert.equal(calls.filter((call) => call.path.endsWith("/comment-dm-fail/replies")).length, 0);
 assert.equal(calls.filter((call) => call.path.endsWith("/comment-followed/replies")).length, 1);

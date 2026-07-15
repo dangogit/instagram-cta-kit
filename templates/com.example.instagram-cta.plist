@@ -6,9 +6,11 @@
   <string>com.example.instagram-cta</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/env</string>
-    <string>npm</string>
+    <string>REPLACE_WITH_NODE_PATH</string>
+    <string>REPLACE_WITH_REPOSITORY_PATH/bin/instagram-cta.mjs</string>
     <string>start</string>
+    <string>--dir</string>
+    <string>REPLACE_WITH_REPOSITORY_PATH</string>
   </array>
   <key>WorkingDirectory</key>
   <string>REPLACE_WITH_REPOSITORY_PATH</string>
