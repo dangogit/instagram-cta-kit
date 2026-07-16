@@ -99,23 +99,23 @@ instagram-cta start [--dir PATH]
 Add a route:
 
 ```bash
-npx github:dangogit/instagram-cta-kit route add GUIDE https://example.com/guide \
-  --campaign-id my-first-guide
+npx github:dangogit/instagram-cta-kit route add CHECKLIST https://example.com/checklist \
+  --campaign-id my-first-checklist
 ```
 
 Hebrew:
 
 ```bash
-npx github:dangogit/instagram-cta-kit route add מדריך https://example.com/he/guide \
-  --campaign-id hebrew-guide \
+npx github:dangogit/instagram-cta-kit route add צקליסט https://example.com/he/checklist \
+  --campaign-id hebrew-checklist \
   --locale he
 ```
 
 Follower gate is opt-in:
 
 ```bash
-npx github:dangogit/instagram-cta-kit route add GUIDE https://example.com/guide \
-  --campaign-id my-first-guide \
+npx github:dangogit/instagram-cta-kit route add CHECKLIST https://example.com/checklist \
+  --campaign-id my-first-checklist \
   --follow-gate
 ```
 

@@ -30,7 +30,7 @@ npx github:dangogit/instagram-cta-kit init --dir ./instagram-cta --locale en --m
 5. Add a route:
 
 ```bash
-npx github:dangogit/instagram-cta-kit route add GUIDE https://example.com/guide \
+npx github:dangogit/instagram-cta-kit route add CHECKLIST https://example.com/checklist \
   --dir ./instagram-cta \
   --campaign-id stable-content-slug
 ```

@@ -31,22 +31,22 @@ const add = spawnSync(process.execPath, [
   cli,
   "route",
   "add",
-  "TEST",
-  "https://example.com/test",
+  "CHECKLIST",
+  "https://example.com/checklist",
   "--dir",
   home,
   "--campaign-id",
-  "test-guide",
+  "first-checklist",
   "--locale",
   "en",
 ], { encoding: "utf8" });
 assert.equal(add.status, 0, add.stderr);
 
 const updated = JSON.parse(await readFile(join(home, "routes.json"), "utf8"));
-const added = updated.routes.find((route) => route.keyword === "TEST");
-assert.equal(added.campaign_id, "test-guide");
+const added = updated.routes.find((route) => route.keyword === "CHECKLIST");
+assert.equal(added.campaign_id, "first-checklist");
 assert.equal(added.requires_follow, undefined);
-assert.match(added.reply_text, /https:\/\/example\.com\/test/);
+assert.match(added.reply_text, /https:\/\/example\.com\/checklist/);
 
 const badUrl = spawnSync(process.execPath, [
   cli,
@@ -64,7 +64,7 @@ assert.match(badUrl.stderr, /valid https URL without embedded credentials/);
 
 updated.routes.push({
   keyword: "ALIASROUTE",
-  aliases: ["TEST"],
+  aliases: ["CHECKLIST"],
   campaign_id: "alias-collision",
   guide_url: "https://example.com/alias",
   reply_text: "Alias: https://example.com/alias",

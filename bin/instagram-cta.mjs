@@ -50,7 +50,7 @@ Usage:
 Examples:
   npx github:dangogit/instagram-cta-kit init --locale en --mode polling
   npx github:dangogit/instagram-cta-kit doctor
-  npx github:dangogit/instagram-cta-kit route add GUIDE https://example.com/guide --campaign-id first-guide
+  npx github:dangogit/instagram-cta-kit route add CHECKLIST https://example.com/checklist --campaign-id first-checklist
   npx github:dangogit/instagram-cta-kit start
 `);
 }

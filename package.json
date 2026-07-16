@@ -1,6 +1,6 @@
 {
   "name": "instagram-cta-kit",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Self-hosted Instagram comment and DM keyword automation using the official Meta API",
   "type": "module",
   "license": "MIT",
