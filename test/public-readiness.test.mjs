@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHmac } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -35,7 +35,7 @@ process.env.DEFAULT_LOCALE = "en";
 process.env.PORT = "0";
 process.env.HOST = "127.0.0.1";
 process.env.VERIFY_TOKEN = "public-readiness-verify-token";
-process.env.META_APP_SECRET = "public-readiness-app-secret";
+process.env.META_APP_SECRET = randomBytes(32).toString("hex");
 process.env.IG_USER_ID = "account-1";
 process.env.IG_ACCESS_TOKEN = "dry-run-token";
 process.env.ROUTES_FILE = join(tmp, "routes.json");
@@ -46,7 +46,12 @@ process.env.DRY_RUN = "1";
 process.env.POLL_ENABLED = "0";
 process.env.MAX_WEBHOOK_BODY_BYTES = "512";
 
-const { createServer, processComments, processMessages } = await import("../src/server.mjs");
+const {
+  createServer,
+  processComments,
+  processMessages,
+  runRecoveryOnce,
+} = await import("../src/server.mjs");
 
 function message(id, payload, text = "") {
   return {
@@ -155,7 +160,13 @@ const sendWebhook = () => fetch(`${base}/webhook`, {
 }).then((response) => response.json());
 
 const concurrent = await Promise.all([sendWebhook(), sendWebhook()]);
-const statuses = concurrent.flatMap((result) => result.comments.map((item) => item.status)).sort();
+const recovery = await runRecoveryOnce({ limit: 100 });
+const statuses = [
+  ...recovery.results.map((item) => item.status),
+  ...concurrent.flatMap((result) => (
+    result.queued.filter((item) => item.duplicate).map(() => "skipped_duplicate")
+  )),
+].sort();
 assert.deepEqual(statuses, ["sent", "skipped_duplicate"]);
 
 events = (await readFile(stateFile, "utf8")).trim().split("\n").map(JSON.parse);

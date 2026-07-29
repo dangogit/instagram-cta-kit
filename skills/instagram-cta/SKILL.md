@@ -1,55 +1,63 @@
 ---
 name: instagram-cta
-description: Set up, validate, and operate the self-hosted Instagram CTA Kit using the official Meta Instagram API.
+description: Set up, validate, and operate Instagram CTA Kit with HookMyApp or a direct Meta app.
 ---
 
 # Instagram CTA Kit
 
-Use this skill for comment-keyword DMs, Story reply automation, guide delivery, or local Instagram CTA hosting.
+Use this skill for comment keywords, Story replies, guide delivery, health checks, and failed-delivery recovery.
 
-## Safety Rules
+## Safety rules
 
-- Use the official Meta Instagram API only.
+- Use HookMyApp or the official Meta Instagram API.
 - Never request an Instagram password or automate the Instagram website.
-- Never print, commit, or paste access tokens, app secrets, `.env`, webhook payloads, or local state.
-- Do not enable live delivery until doctor, route validation, health, and a dry-run pass.
-- Keep background follow delivery disabled. Recheck follow state only after a fresh user message or button tap.
-- Confirm the exact account and exact route copy before enabling live messages.
+- Never print, commit, or paste access tokens, secrets, `.env`, webhook payloads, or local state.
+- Keep `DRY_RUN=1` until doctor, routes, health, and a controlled simulation pass.
+- Keep background follow delivery disabled. Recheck follow state after a fresh user action.
+- Confirm the account and route copy before enabling live messages.
+- A webhook acknowledgement is not delivery proof. Check the queue and the real Instagram reply.
 
-## Setup
-
-1. Verify Node.js 20 or newer.
-2. Initialize a config directory:
+## Recommended setup
 
 ```bash
-npx github:dangogit/instagram-cta-kit init --dir ./instagram-cta --locale en --mode polling
+npm install -g @gethookmyapp/cli
+npm install -g github:dangogit/instagram-cta-kit
+hookmyapp login
+hookmyapp channels connect instagram
+instagram-cta init --dir ./instagram-cta --provider hookmyapp --locale en
 ```
 
-3. Tell the user to put secrets directly into `.env`. Do not ask them to paste secrets into chat.
-4. Run `npx github:dangogit/instagram-cta-kit doctor --dir ./instagram-cta`.
-5. Add a route:
+Write the selected HookMyApp channel env to the generated `.env`. Add the webhook HMAC secret without displaying it in chat.
+
+Then:
 
 ```bash
-npx github:dangogit/instagram-cta-kit route add CHECKLIST https://example.com/checklist \
+instagram-cta doctor --dir ./instagram-cta --live
+instagram-cta route add CHECKLIST https://example.com/checklist \
   --dir ./instagram-cta \
   --campaign-id stable-content-slug
+instagram-cta routes validate --dir ./instagram-cta --check-guides
+instagram-cta start --dir ./instagram-cta
 ```
 
-6. Validate and start in dry-run mode:
+Use `hookmyapp channels listen` for local webhook testing. Use a permanent HookMyApp webhook URL for a server.
+
+## Direct Meta
+
+Use `instagram-cta init --provider meta` and follow `docs/meta-setup.md`. Require a signed webhook or polling with valid Instagram credentials.
+
+## Recovery
+
+Check:
 
 ```bash
-npx github:dangogit/instagram-cta-kit routes validate --dir ./instagram-cta --check-guides
-npx github:dangogit/instagram-cta-kit start --dir ./instagram-cta
+instagram-cta status --dir ./instagram-cta
+instagram-cta recover --dir ./instagram-cta
+instagram-cta dead-letter list --dir ./instagram-cta
 ```
 
-7. Verify `GET /health` reports `ok:true`, `dry_run:true`, and no poll error.
-8. Only after the user approves live delivery, set `DRY_RUN=0`, restart, and run one controlled keyword test.
+Retry a dead letter only after checking the provider error and current recipient state. Resolve it only when the failure is confirmed permanent or handled outside the automation.
 
-## Operating Modes
+## Completion proof
 
-- Polling is appropriate for a personal computer without a public URL. The computer must stay awake.
-- Webhooks are preferred for production. Require public HTTPS, signature verification, and the Meta subscriptions `comments`, `messages`, and `messaging_postbacks`.
-
-## Completion Proof
-
-Report local configuration, route validation, runtime health, dry-run delivery, and separately any explicitly authorized live delivery.
+Report provider, route validation, runtime health, queue counts, dry-run result, and separately any authorized live comment and DM proof.

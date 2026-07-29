@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node: [20, 22]
+        node: [20, 22, 24, 26]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -29,8 +29,32 @@ jobs:
       - run: npm test
       - name: Smoke test generated configuration
         run: |
-          home="$(mktemp -d)"
-          node bin/instagram-cta.mjs init --dir "$home" --locale en --mode polling
-          node bin/instagram-cta.mjs doctor --dir "$home"
-          node bin/instagram-cta.mjs routes validate --dir "$home"
+          hookmyapp_home="$(mktemp -d)"
+          node bin/instagram-cta.mjs init --dir "$hookmyapp_home" --provider hookmyapp --locale en
+          node bin/instagram-cta.mjs doctor --dir "$hookmyapp_home"
+          node bin/instagram-cta.mjs routes validate --dir "$hookmyapp_home"
+          meta_home="$(mktemp -d)"
+          node bin/instagram-cta.mjs init --dir "$meta_home" --provider meta --locale en --mode polling
+          node bin/instagram-cta.mjs doctor --dir "$meta_home"
+          node bin/instagram-cta.mjs routes validate --dir "$meta_home"
       - run: npm run pack:check
+
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run pack:check
+      - name: Smoke test generated configuration
+        shell: pwsh
+        run: |
+          $ctaConfigDir = Join-Path $env:RUNNER_TEMP "instagram-cta-hookmyapp"
+          New-Item -ItemType Directory -Force -Path $ctaConfigDir | Out-Null
+          node bin/instagram-cta.mjs init --dir $ctaConfigDir --provider hookmyapp --locale en
+          node bin/instagram-cta.mjs doctor --dir $ctaConfigDir
+          node bin/instagram-cta.mjs routes validate --dir $ctaConfigDir

@@ -1,4 +1,4 @@
-FROM node:26-alpine
+FROM node:22-alpine
 
 WORKDIR /app
 COPY --chown=node:node package.json package-lock.json ./
@@ -6,7 +6,7 @@ RUN npm ci --omit=dev
 COPY --chown=node:node . .
 RUN mkdir -p /app/state && chown node:node /app/state
 
-ENV HOST=0.0.0.0
+ENV HOST=127.0.0.1
 EXPOSE 18787
 USER node
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \

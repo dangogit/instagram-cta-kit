@@ -1,177 +1,194 @@
-# Instagram CTA Kit
+# Instagram CTA Kit by Daniel Goldman
 
-Self-hosted keyword automation for Instagram comments, DMs, Story replies, and guide delivery. It uses the official Meta Instagram API and runs on your own Mac, Windows PC, Linux machine, Raspberry Pi, or server.
+Self-hosted Instagram comment and DM automation for creators, teachers, and small teams.
 
-The message path is deterministic. There is no AI model generating live replies.
-
-## What It Does
+Someone comments a keyword, replies to a Story, or sends a DM. The kit asks for confirmation, optionally checks whether they follow the account, and sends the right guide. Replies are deterministic. No model writes live messages.
 
 ```text
-Comment, DM, or Story reply
-  -> exact keyword match
-  -> public reply and private opt-in question
-  -> user taps a quick reply
-  -> optional follower check
-  -> attributed guide link
-  -> local event log and optional sanitized analytics
+Instagram comment, DM, or Story reply
+  -> HookMyApp or your own Meta app
+  -> signed webhook
+  -> durable local inbox
+  -> exact keyword route
+  -> public reply and private DM
+  -> retry, recovery, or dead-letter queue
 ```
 
-Features:
+HookMyApp is the recommended setup for students. It connects Instagram through Meta OAuth, gives you API credentials, signs webhooks, and removes the need to build a Meta app. If you already have a Meta app, the same CTA engine works directly with it.
 
-- Comment keyword to private reply.
-- Direct DM and Story reply keywords.
-- Quick reply buttons.
-- Optional follower gate, rechecked only after a fresh user action by default.
-- Exact token matching, aliases, Hebrew keywords, and safe one-character typo recovery.
-- Polling fallback with cursor pagination.
-- Signed Meta webhooks.
-- Duplicate protection across restarts.
-- Campaign attribution with opaque HMAC delivery IDs.
-- English and Hebrew defaults.
-- No runtime dependencies beyond Node.js 20 or newer.
+## What it handles
 
-## Requirements
+- Comment keyword to public reply and private DM
+- DM and Story reply keywords
+- Quick reply buttons
+- Optional follower check after a fresh user action
+- English and Hebrew routes
+- Exact token matching, aliases, and safe one-character typo recovery
+- Signed HookMyApp and Meta webhooks
+- Polling fallback and six-hour reconciliation with a five-minute retry after transient failures
+- Durable events written to disk before webhook acknowledgement
+- Retry with exponential backoff
+- Crash recovery and a dead-letter queue
+- Duplicate protection across restarts
+- Campaign attribution with opaque delivery IDs
+- No runtime dependencies beyond Node.js 20 or newer
 
-- Node.js 20 or newer.
-- An Instagram Business or Creator account.
-- A Meta app configured for the Instagram API.
-- An Instagram user access token.
-- The `instagram_business_basic`, `instagram_business_manage_comments`, and `instagram_business_manage_messages` permissions for Instagram Login.
-- A public HTTPS URL when using webhooks. Polling mode does not need a public URL.
+## Choose your provider
 
-Use only the official Meta API. Do not use browser automation, scraping, or private Instagram endpoints.
+| Provider | Meta app required | Best for |
+|---|---:|---|
+| HookMyApp | No | Students, creators, and the fastest setup |
+| Direct Meta | Yes | Teams that already operate their own approved Meta app |
 
-Standard Access is enough for accounts you own or manage and have added to the Meta app. Serving professional accounts you do not own or manage requires Advanced Access and App Review. Follow the [Meta setup checklist](docs/meta-setup.md) before switching off dry-run mode.
+Both providers use the official Instagram API. The difference is who manages the Meta connection and credentials.
 
-## Quick Start
+## HookMyApp quick start
+
+Requirements:
+
+- Node.js 20 or newer
+- An Instagram Business or Creator account
+- A HookMyApp account
+- A machine that stays online, or a small server
+
+Install both CLIs:
 
 ```bash
-git clone https://github.com/dangogit/instagram-cta-kit.git
-cd instagram-cta-kit
-npm install
-node bin/instagram-cta.mjs init --locale en --mode polling
+npm install -g @gethookmyapp/cli
+npm install -g github:dangogit/instagram-cta-kit
 ```
 
-Edit `.env` with your Meta credentials. Leave `DRY_RUN=1` for the first test.
-
-Then:
+Connect Instagram:
 
 ```bash
-npm run doctor
-npm run validate:routes
-npm start
+hookmyapp login
+hookmyapp channels connect instagram
+hookmyapp channels list
 ```
 
-Open another terminal:
+Initialize the CTA project:
 
 ```bash
-curl http://127.0.0.1:18787/health
+instagram-cta init --dir ./my-instagram-cta --provider hookmyapp --locale en
+hookmyapp channels env ch_YOUR_CHANNEL --write ./my-instagram-cta/.env
+hookmyapp channels webhook hmac show ch_YOUR_CHANNEL
 ```
 
-When the configuration is correct, change `DRY_RUN=0` and restart.
+Put the HMAC value from the last command in `WEBHOOK_HMAC_SECRET` inside `./my-instagram-cta/.env`. Keep it private.
 
-With placeholder credentials, the server starts for local webhook simulation but polling stays paused. Add a valid `IG_USER_ID` and `IG_ACCESS_TOKEN` to test read-only polling while `DRY_RUN=1` still prevents outbound messages.
-
-### Run through npx
-
-The GitHub repository can be used directly:
+Add a real guide route:
 
 ```bash
-npx github:dangogit/instagram-cta-kit init --dir ./my-instagram-cta
-npx github:dangogit/instagram-cta-kit doctor --dir ./my-instagram-cta
-npx github:dangogit/instagram-cta-kit start --dir ./my-instagram-cta
+instagram-cta route add CHECKLIST https://example.com/checklist \
+  --dir ./my-instagram-cta \
+  --campaign-id first-checklist
+
+instagram-cta doctor --dir ./my-instagram-cta --live
+instagram-cta routes validate --dir ./my-instagram-cta --check-guides
 ```
 
-Keep the terminal open, or install it as a background process using Docker, launchd, systemd, or Windows Task Scheduler.
+Start in dry-run mode:
 
-For a persistent background service, clone the repository instead of depending on an ephemeral npx cache.
+```bash
+instagram-cta start --dir ./my-instagram-cta
+```
+
+In another terminal, forward HookMyApp webhooks to the local server:
+
+```bash
+hookmyapp channels listen ch_YOUR_CHANNEL --port 18787 --path /webhook
+```
+
+Comment the keyword from a test account. Check:
+
+```bash
+instagram-cta status --dir ./my-instagram-cta
+```
+
+When the dry run is correct, set `DRY_RUN=0`, restart the CTA service, and test one real comment end to end.
+
+For a server with a public HTTPS URL, configure the permanent callback:
+
+```bash
+hookmyapp channels webhook set ch_YOUR_CHANNEL \
+  --url https://your-domain.example/webhook \
+  --verify-token YOUR_VERIFY_TOKEN
+```
+
+Replace `YOUR_VERIFY_TOKEN` with the value already stored in `.env`. Full setup and troubleshooting are in [docs/hookmyapp-setup.md](docs/hookmyapp-setup.md).
+
+## Direct Meta setup
+
+If you already have a Meta app:
+
+```bash
+instagram-cta init --dir ./my-instagram-cta --provider meta --locale en
+```
+
+Add your app secret, account ID, and long-lived Instagram token to `.env`. Then follow [docs/meta-setup.md](docs/meta-setup.md). Direct Meta supports polling on a computer without a public URL, or signed webhooks on a public HTTPS URL.
 
 ## CLI
 
 ```bash
-instagram-cta init [--dir PATH] [--locale en|he] [--mode polling|webhook]
-instagram-cta doctor [--dir PATH] [--live]
+instagram-cta init [--provider hookmyapp|meta] [--locale en|he] [--mode polling|webhook]
+instagram-cta doctor [--live]
 instagram-cta route add KEYWORD URL --campaign-id ID
 instagram-cta routes validate [--check-guides]
-instagram-cta start [--dir PATH]
+instagram-cta status
+instagram-cta recover
+instagram-cta dead-letter list
+instagram-cta dead-letter retry EVENT_KEY
+instagram-cta dead-letter resolve EVENT_KEY --reason TEXT
+instagram-cta start
 ```
 
-Add a route:
+Every command accepts `--dir PATH`.
+
+Hebrew route example:
 
 ```bash
-npx github:dangogit/instagram-cta-kit route add CHECKLIST https://example.com/checklist \
-  --campaign-id my-first-checklist
-```
-
-Hebrew:
-
-```bash
-npx github:dangogit/instagram-cta-kit route add צקליסט https://example.com/he/checklist \
+instagram-cta route add צקליסט https://example.com/he/checklist \
+  --dir ./my-instagram-cta \
   --campaign-id hebrew-checklist \
   --locale he
 ```
 
-Follower gate is opt-in:
+Follower gating is optional:
 
 ```bash
-npx github:dangogit/instagram-cta-kit route add CHECKLIST https://example.com/checklist \
-  --campaign-id my-first-checklist \
+instagram-cta route add CHECKLIST https://example.com/checklist \
+  --dir ./my-instagram-cta \
+  --campaign-id first-checklist \
   --follow-gate
 ```
 
-User-facing messages can be overridden with `--intro-text`, `--guide-text`, `--public-text`, `--non-follower-text`, and `--unknown-follower-text`.
+Follower checks run after a user comment, message, or button tap. Background follow delivery stays off by default.
 
-## Polling or Webhooks
+## Recovery
 
-Polling is easiest on a personal computer:
+Each webhook event is saved under `state/inbox/pending` before the server returns `200`. The worker moves it through these states:
 
-- No public URL is needed.
-- New comments and DMs are checked every 60 seconds by default.
-- The computer must stay online and awake.
-
-Webhooks are recommended for production:
-
-- Events arrive in real time.
-- Meta must reach `https://your-domain.example/webhook`.
-- Subscribe the app to `comments`, `messages`, and `messaging_postbacks`.
-- The service verifies `X-Hub-Signature-256` using `META_APP_SECRET`.
-
-You can use Cloudflare Tunnel, ngrok, a reverse proxy, or a public server. Never expose an unsigned webhook handler.
-
-## Docker
-
-```bash
-node bin/instagram-cta.mjs init --mode polling
-docker compose up -d --build
-docker compose logs -f
+```text
+pending -> processing -> completed
+                    -> pending with backoff
+                    -> dead-letter
 ```
 
-The container port is bound to localhost by default. Put a TLS reverse proxy or tunnel in front of it for Meta webhooks.
+If the process crashes while an event is under `processing`, it returns to `pending` on startup. Permanent provider rejections go to `dead-letter` with sanitized error metadata.
 
-Docker runs as a non-root user with a read-only root filesystem. Runtime state is stored in the Compose volume named `instagram-cta-state`. Back up the resolved Docker volume before replacing a host or intentionally removing Docker volumes.
-
-## Running in the Background
-
-### macOS
-
-Use `templates/com.example.instagram-cta.plist`. Replace the repository path and `REPLACE_WITH_NODE_PATH` with the output of `command -v node`, copy it to `~/Library/LaunchAgents/`, then load it:
+Useful commands:
 
 ```bash
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.instagram-cta.plist
-launchctl kickstart -k gui/$(id -u)/com.example.instagram-cta
+instagram-cta status --dir ./my-instagram-cta
+instagram-cta recover --dir ./my-instagram-cta
+instagram-cta dead-letter list --dir ./my-instagram-cta
+instagram-cta dead-letter retry EVENT_KEY --dir ./my-instagram-cta
+instagram-cta dead-letter resolve EVENT_KEY --reason "Instagram rejected this recipient" --dir ./my-instagram-cta
 ```
 
-Prevent the Mac from sleeping while the automation is expected to run.
+Do not mark a dead letter resolved until you have checked whether the user received the public reply and DM.
 
-### Linux
-
-Use `templates/instagram-cta.service` with systemd. Replace `REPLACE_WITH_NODE_PATH` with the output of `command -v node`, or use Docker Compose.
-
-### Windows
-
-Create a Task Scheduler task that starts at login and runs `node bin/instagram-cta.mjs start --dir C:\path\to\instagram-cta-kit`. Set the working directory to the cloned repository.
-
-## Route Contract
+## Route format
 
 ```json
 {
@@ -180,50 +197,71 @@ Create a Task Scheduler task that starts at login and runs `node bin/instagram-c
   "guide_url": "https://example.com/guide",
   "intro_text": "Want me to send the guide?",
   "reply_text": "Here is the guide:\nhttps://example.com/guide",
-  "public_reply_text": "Sent you a DM ✨",
+  "public_reply_text": "Sent you a DM",
   "requires_follow": false
 }
 ```
 
-The guide URL must appear exactly inside `reply_text`. At delivery time it is replaced with an attributed URL containing `utm_source`, `utm_medium`, `utm_campaign`, `utm_content`, `cta`, and an opaque `delivery_id`.
+The guide URL must appear exactly inside `reply_text`. The kit replaces it at delivery time with an attributed URL.
 
-The same keyword can be used for different posts only when every overlapping route has non-overlapping `media_ids`. The post ID is carried into quick replies so the correct guide is selected. A keyword that is ambiguous without post context is ignored in a direct DM or Story reply instead of guessing.
+If the same keyword routes to different guides, each route needs non-overlapping `media_ids`. Ambiguous DMs are ignored instead of guessed.
 
-## Privacy and Security
+## Docker
 
-- `.env`, `routes.json`, `state/`, webhook payloads, and access tokens are ignored by Git.
-- Docker build context excludes `.env`, `routes.json`, local state, logs, Git history, and package archives.
-- Webhook message content is not logged unless `LOG_WEBHOOK_CONTENT=1` is explicitly set.
-- Ignored DM text is never written to the event log.
-- PostHog is disabled by default.
-- When enabled, PostHog receives the opaque delivery ID and campaign metadata, not email addresses or Instagram user IDs.
-- Local state contains Instagram-scoped identifiers needed for deduplication and pending conversations. Keep the machine and backups protected. Delete state according to your retention policy.
-- Rotate access tokens and secrets immediately if they are ever committed or shared.
-- Webhook bodies are capped at 1 MB by default, and Meta API calls time out after 10 seconds. Both limits are configurable.
-- Meta `429` and `5xx` send responses receive bounded retries. A webhook is not acknowledged as successful while delivery still fails. Successful stages are deduplicated before later attempts.
+```bash
+instagram-cta init --provider hookmyapp
+docker compose up -d --build
+docker compose logs -f
+```
 
-See [SECURITY.md](SECURITY.md) for the supported version and private vulnerability reporting process.
+The container runs as a non-root user with a read-only root filesystem. Local state lives in the `instagram-cta-state` volume. Back up that volume before moving or replacing the host.
 
-## Operating Boundary
+The app refuses a non-loopback HTTP bind unless `ALLOW_INSECURE_HTTP=1` is explicit. Docker Compose sets it because the published host port is still bound to `127.0.0.1`. Put HTTPS in front before making the webhook public.
 
-This release is designed for one Instagram professional account and one active process using one state directory or Docker volume. It is suitable for an individual or small team running a low-volume CTA funnel. It is not a multi-tenant SaaS, a high-availability cluster, or a managed backup service.
+## Production checklist
 
-Do not run multiple replicas against the same account and separate state stores. Duplicate protection is serialized inside one process and persisted to its local state.
+Before setting `DRY_RUN=0`:
 
-## Meta Messaging Limits
+1. `instagram-cta doctor --live` passes.
+2. Route validation and guide URL checks pass.
+3. `/health` reports an empty pending queue and no dead letters.
+4. The webhook URL is public HTTPS and signature verification is enabled.
+5. One controlled test proves the public reply, opt-in DM, button tap, and final guide.
+6. The machine will stay online.
 
-Meta currently allows one private reply to a comment within seven days. Additional messages require a user response and must stay inside the messaging window. The kit asks for confirmation before sending the final guide and keeps background follow delivery disabled by default.
+## Limits
 
-Review Meta's current rules before deploying because permissions and messaging limits can change:
+This release is for one Instagram professional account and one process using one state directory. It is not a multi-tenant SaaS or a high-availability cluster.
 
-- [Instagram API collection by Meta](https://www.postman.com/meta/instagram/documentation/6yqw8pt/instagram-api)
-- [Private Replies by Meta](https://www.postman.com/meta/instagram/request/23987686-189d7215-22b3-403f-b2f5-a46c7e66a514)
-- [Messaging webhooks by Meta](https://www.postman.com/meta/instagram/request/23987686-95cce6f6-b811-41dc-b560-d43741c5002a)
+Instagram can reject a private reply even when the public comment reply succeeds. The recovery queue keeps the failure visible, but it cannot override Instagram policy or make an undeliverable recipient deliverable.
 
-## Agent Skill
+HookMyApp and Meta can also limit history depth. Reconciliation is a safety net, not proof that unlimited old history can always be recovered. Keep backups of the state directory and monitor `/health`.
 
-The repository includes `skills/instagram-cta/SKILL.md`. An agent can initialize the project, add routes, validate configuration, and verify health. The runtime still needs to stay online after the agent finishes.
+Delivery is at least once. If the process dies after Instagram accepts a send but before the local success record reaches disk, recovery may send that step again. The provider API does not offer an idempotency key for every Instagram reply operation.
+
+Meta messaging rules and permissions change. Review the current platform rules before live delivery.
+
+## Security
+
+- Never commit `.env`, `routes.json`, `state/`, tokens, secrets, or webhook payloads.
+- Keep `LOG_WEBHOOK_CONTENT=0` unless you are debugging on a protected machine.
+- Bind the service to localhost unless it sits behind HTTPS.
+- Rotate any credential that appears in chat, a screenshot, an issue, or Git history.
+- Treat `CTA_ADMIN_TOKEN` like a password. It controls retry and dead-letter actions.
+- Pending and failed queue records contain normalized message text, quick-reply payloads, Instagram IDs, and Story URLs needed for replay. Treat `state/` and backups as private data.
+
+See [SECURITY.md](SECURITY.md).
+
+## Background services
+
+Templates are included for macOS launchd and Linux systemd. Windows users can run the same `start` command from Task Scheduler. Replace the template paths and Node binary before installing a service.
+
+## Agent skill
+
+The repo includes `skills/instagram-cta/SKILL.md`. Coding agents can initialize the kit, validate routes, inspect health, and operate recovery without reading secrets into chat.
 
 ## License
 
 MIT
+
+Built by [Daniel Goldman](https://danielthegoldman.com), [@danielthegoldman](https://www.instagram.com/danielthegoldman/).

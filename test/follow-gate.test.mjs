@@ -116,7 +116,7 @@ const state = await readFile(stateFile, "utf8");
 assert.doesNotMatch(state, /follow_gate_reminder_sent/);
 assert.match(state, /follow_gate_guide_sent/);
 
-const second = await processPendingFollowGate(null, new Date());
+const second = await processPendingFollowGate(null, new Date("2026-07-02T08:03:00.000Z"));
 assert.deepEqual(second, [
   { fromId: "user-remind", keyword: "DUO", status: "awaiting_follow" },
 ]);

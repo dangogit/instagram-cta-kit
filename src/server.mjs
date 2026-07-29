@@ -1,8 +1,11 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import http from "node:http";
+import { createDurableInbox } from "./durable-inbox.mjs";
+import { createRecoveryWorker } from "./recovery-worker.mjs";
+import { verifyWebhookSignature } from "./webhook-signature.mjs";
 
 const homeDir = resolve(process.env.INSTAGRAM_CTA_HOME || process.cwd());
 const locale = process.env.DEFAULT_LOCALE === "he" ? "he" : "en";
@@ -47,18 +50,53 @@ const copy = {
 const env = {
   port: positiveInteger(process.env.PORT, 18787),
   host: process.env.HOST || "127.0.0.1",
-  verifyToken: process.env.VERIFY_TOKEN || "",
+  allowInsecureHttp: process.env.ALLOW_INSECURE_HTTP === "1",
+  provider: process.env.CTA_PROVIDER
+    || (process.env.INSTAGRAM_GRAPH_API_URL ? "hookmyapp" : "meta"),
+  verifyToken: process.env.HOOKMYAPP_VERIFY_TOKEN || process.env.VERIFY_TOKEN || "",
   appSecret: process.env.META_APP_SECRET || "",
-  igUserId: process.env.IG_USER_ID || "",
-  accessToken: process.env.IG_ACCESS_TOKEN || "",
-  graphBaseUrl: process.env.GRAPH_BASE_URL || "https://graph.instagram.com/v25.0",
+  hookmyappWebhookSecret: process.env.WEBHOOK_HMAC_SECRET || "",
+  igUserId: process.env.INSTAGRAM_ACCOUNT_ID || process.env.IG_USER_ID || "",
+  accessToken: process.env.INSTAGRAM_ACCESS_TOKEN || process.env.IG_ACCESS_TOKEN || "",
+  graphBaseUrl: process.env.INSTAGRAM_GRAPH_API_URL
+    || process.env.GRAPH_BASE_URL
+    || "https://graph.instagram.com/v25.0",
+  hookmyappChannelId: process.env.HOOKMYAPP_CHANNEL_ID || "",
   routesFile: resolve(homeDir, process.env.ROUTES_FILE || "./routes.json"),
   stateFile: resolve(homeDir, process.env.STATE_FILE || "./state/events.jsonl"),
   webhookLogFile: resolve(homeDir, process.env.WEBHOOK_LOG_FILE || "./state/webhooks.jsonl"),
+  queueDir: resolve(
+    homeDir,
+    process.env.CTA_QUEUE_DIR
+      || resolve(dirname(resolve(homeDir, process.env.STATE_FILE || "./state/events.jsonl")), "inbox"),
+  ),
+  recoveryStatusFile: resolve(
+    homeDir,
+    process.env.RECOVERY_STATUS_FILE
+      || resolve(
+        dirname(resolve(homeDir, process.env.STATE_FILE || "./state/events.jsonl")),
+        "recovery-status.json",
+      ),
+  ),
+  reconciliationStatusFile: resolve(
+    homeDir,
+    process.env.RECONCILIATION_STATUS_FILE
+      || resolve(
+        dirname(resolve(homeDir, process.env.STATE_FILE || "./state/events.jsonl")),
+        "reconciliation-status.json",
+      ),
+  ),
+  adminToken: process.env.CTA_ADMIN_TOKEN || "",
   dryRun: process.env.DRY_RUN === "1",
   defaultPublicReplyText: process.env.DEFAULT_PUBLIC_REPLY_TEXT || copy.publicReply,
   logWebhookContent: process.env.LOG_WEBHOOK_CONTENT === "1",
   pollEnabled: process.env.POLL_ENABLED === "1",
+  reconcileEnabled: process.env.RECONCILE_ENABLED !== "0",
+  reconcileIntervalMs: positiveInteger(
+    process.env.RECONCILE_INTERVAL_MS,
+    6 * 60 * 60 * 1000,
+  ),
+  reconcileRetryMs: positiveInteger(process.env.RECONCILE_RETRY_MS, 5 * 60 * 1000),
   maxWebhookBodyBytes: positiveInteger(process.env.MAX_WEBHOOK_BODY_BYTES, 1_048_576),
   metaRequestTimeoutMs: positiveInteger(process.env.META_REQUEST_TIMEOUT_MS, 10_000),
   pollIntervalMs: positiveInteger(process.env.POLL_INTERVAL_MS, 60000),
@@ -75,28 +113,102 @@ const env = {
   followGateEnabled: process.env.FOLLOW_GATE_GUIDE_ENABLED === "1",
   followGateIntervalMs: positiveInteger(process.env.FOLLOW_GATE_INTERVAL_MS, 600000),
   followGateMaxAgeDays: positiveInteger(process.env.FOLLOW_GATE_MAX_AGE_DAYS, 14),
-  attributionSecret: process.env.CTA_ATTRIBUTION_SECRET || (process.env.DRY_RUN === "1" ? "dry-run-attribution-secret" : ""),
+  recoveryIntervalMs: positiveInteger(process.env.RECOVERY_INTERVAL_MS, 1000),
+  recoveryRetryBaseMs: positiveInteger(process.env.RECOVERY_RETRY_BASE_MS, 30000),
+  recoveryMaxAttempts: positiveInteger(process.env.RECOVERY_MAX_ATTEMPTS, 5),
+  attributionSecret: process.env.CTA_ATTRIBUTION_SECRET
+    || (process.env.DRY_RUN === "1" ? randomBytes(32).toString("hex") : ""),
   posthogToken: process.env.POSTHOG_PROJECT_TOKEN || "",
   posthogHost: process.env.POSTHOG_HOST || "",
 };
 
+if (!["hookmyapp", "meta"].includes(env.provider)) {
+  throw new Error("CTA_PROVIDER must be hookmyapp or meta");
+}
+
 const pollStatus = {
   lastRunAt: null,
-  lastError: null,
   sinceIso: env.initialPollSinceIso,
   mediaCount: 0,
   commentCount: 0,
   messageCount: 0,
   resultCount: 0,
   followGateResultCount: 0,
+  lastReconciliationAt: null,
+  lastReconciliationAttemptAt: null,
+  lastReconciliationFailureAt: null,
+  reconciliationConsecutiveFailures: 0,
+  nextReconciliationAt: null,
 };
+
+const RECONCILIATION_STATUS_FIELDS = [
+  "lastReconciliationAt",
+  "lastReconciliationAttemptAt",
+  "lastReconciliationFailureAt",
+  "reconciliationConsecutiveFailures",
+  "nextReconciliationAt",
+];
+
+async function loadReconciliationStatus() {
+  try {
+    const saved = JSON.parse(await readFile(env.reconciliationStatusFile, "utf8"));
+    for (const field of RECONCILIATION_STATUS_FIELDS) {
+      if (Object.hasOwn(saved, field)) pollStatus[field] = saved[field];
+    }
+    pollStatus.reconciliationConsecutiveFailures = Math.max(
+      0,
+      Number(pollStatus.reconciliationConsecutiveFailures) || 0,
+    );
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      console.error(`could not load reconciliation status: ${String(error?.message || error).slice(0, 500)}`);
+    }
+  }
+}
+
+async function persistReconciliationStatus() {
+  await mkdir(dirname(env.reconciliationStatusFile), { recursive: true, mode: 0o700 });
+  await writeFile(
+    env.reconciliationStatusFile,
+    `${JSON.stringify(Object.fromEntries(
+      RECONCILIATION_STATUS_FIELDS.map((field) => [field, pollStatus[field]]),
+    ), null, 2)}\n`,
+    { mode: 0o600 },
+  );
+}
+
+const durableInbox = createDurableInbox({ rootDir: env.queueDir });
+const recoveryWorker = createRecoveryWorker({
+  inbox: durableInbox,
+  processEvent: processQueuedEvent,
+  statusFile: env.recoveryStatusFile,
+  intervalMs: env.recoveryIntervalMs,
+  retryBaseMs: env.recoveryRetryBaseMs,
+  maxAttempts: env.recoveryMaxAttempts,
+});
 
 function assertConfig() {
   const missing = [];
+  const loopbackHosts = new Set(["127.0.0.1", "localhost", "::1"]);
+  if (!loopbackHosts.has(env.host) && !env.allowInsecureHttp) {
+    throw new Error(
+      "A non-loopback HOST requires ALLOW_INSECURE_HTTP=1 and an external HTTPS proxy",
+    );
+  }
   if (isPlaceholder(env.verifyToken)) missing.push("VERIFY_TOKEN");
-  if (!env.dryRun && isPlaceholder(env.appSecret)) missing.push("META_APP_SECRET");
-  if (!env.dryRun && isPlaceholder(env.igUserId)) missing.push("IG_USER_ID");
-  if (!env.dryRun && isPlaceholder(env.accessToken)) missing.push("IG_ACCESS_TOKEN");
+  if (!env.dryRun && env.provider === "meta" && isPlaceholder(env.appSecret)) {
+    missing.push("META_APP_SECRET");
+  }
+  if (!env.dryRun && env.provider === "hookmyapp" && isPlaceholder(env.hookmyappWebhookSecret)) {
+    missing.push("WEBHOOK_HMAC_SECRET");
+  }
+  if (!env.dryRun && isPlaceholder(env.igUserId)) {
+    missing.push(env.provider === "hookmyapp" ? "INSTAGRAM_ACCOUNT_ID" : "IG_USER_ID");
+  }
+  if (!env.dryRun && isPlaceholder(env.accessToken)) {
+    missing.push(env.provider === "hookmyapp" ? "INSTAGRAM_ACCESS_TOKEN" : "IG_ACCESS_TOKEN");
+  }
+  if (!env.dryRun && isPlaceholder(env.adminToken)) missing.push("CTA_ADMIN_TOKEN");
   if (!env.dryRun && isPlaceholder(env.attributionSecret)) missing.push("CTA_ATTRIBUTION_SECRET");
   if (missing.length) {
     throw new Error(`Missing required env: ${missing.join(", ")}`);
@@ -177,12 +289,23 @@ function readBody(req) {
   });
 }
 
-function verifySignature(body, header) {
-  if (env.dryRun) return true;
-  if (!header?.startsWith("sha256=")) return false;
-  const expected = Buffer.from(header.slice("sha256=".length), "hex");
-  const actual = Buffer.from(createHmac("sha256", env.appSecret).update(body).digest("hex"), "hex");
-  return expected.length === actual.length && timingSafeEqual(expected, actual);
+function verifyInboundSignature(body, headers) {
+  const hookmyappHeader = headers["x-hookmyapp-signature-256"];
+  if (hookmyappHeader) {
+    return verifyWebhookSignature(body, hookmyappHeader, env.hookmyappWebhookSecret, {
+      dryRun: env.dryRun,
+    });
+  }
+  const metaHeader = headers["x-hub-signature-256"] || headers["x-hub-signature"] || "";
+  return verifyWebhookSignature(body, metaHeader, env.appSecret, { dryRun: env.dryRun });
+}
+
+function isHookMyAppVerificationProbe(req, body = null) {
+  return (
+    req.headers["x-hookmyapp-probe"] === "webhook-verification"
+    && req.headers["user-agent"] === "HookMyApp-Webhook-Verifier"
+    && (body === null || body.length === 0)
+  );
 }
 
 function extractComments(payload) {
@@ -216,13 +339,22 @@ function extractMessages(payload) {
       const senderId = item.sender?.id;
       const message = item.message || {};
       const postback = item.postback || {};
+      const senderKey = senderId ? String(senderId) : "";
+      const accountIds = new Set(
+        [entry.id, env.igUserId].filter(Boolean).map((value) => String(value)),
+      );
+      const isOutboundEcho = (
+        message.is_echo === true
+        || item.is_echo === true
+        || accountIds.has(senderKey)
+      );
       const text = message.text || postback.title || "";
       const quickReplyPayload = message.quick_reply?.payload || postback.payload || "";
       const story = message.reply_to?.story || item.reply_to?.story || null;
-      if (!senderId || (!text && !quickReplyPayload)) continue;
+      if (!senderId || isOutboundEcho || (!text && !quickReplyPayload)) continue;
       messages.push({
         igUserId: entry.id || item.recipient?.id || env.igUserId,
-        senderId: String(senderId),
+        senderId: senderKey,
         messageId: String(message.mid || postback.mid || `${senderId}:${item.timestamp || ""}:${quickReplyPayload || text}`),
         text: String(text || ""),
         payload: String(quickReplyPayload || ""),
@@ -519,19 +651,59 @@ async function resolveFollowerState(route, comment) {
 }
 
 async function fetchMetaPost(url, options) {
-  let response;
+  let response = null;
+  let lastError = null;
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    response = await fetch(url, {
-      ...options,
-      signal: AbortSignal.timeout(env.metaRequestTimeoutMs),
-    });
+    try {
+      response = await fetch(url, {
+        ...options,
+        signal: AbortSignal.timeout(env.metaRequestTimeoutMs),
+      });
+    } catch (error) {
+      lastError = error;
+      if (attempt === 2) {
+        const networkError = new Error(
+          `Provider network failure: ${String(error?.message || error)}`,
+          { cause: error },
+        );
+        networkError.code = "PROVIDER_NETWORK_ERROR";
+        networkError.metaIsTransient = true;
+        throw networkError;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+      continue;
+    }
     if (response.ok || (response.status !== 429 && response.status < 500) || attempt === 2) {
       return response;
     }
     await response.body?.cancel();
     await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
   }
+  if (!response && lastError) throw lastError;
   return response;
+}
+
+function providerError(label, status, data) {
+  const error = new Error(`${label} ${status}: ${JSON.stringify(data)}`);
+  error.status = status;
+  error.metaCode = data?.error?.code;
+  error.metaSubcode = data?.error?.error_subcode;
+  error.metaIsTransient = data?.error?.is_transient === true || status >= 500 || status === 429;
+  error.code = error.metaIsTransient ? "PROVIDER_TRANSIENT_ERROR" : "PROVIDER_REQUEST_ERROR";
+  return error;
+}
+
+function processingErrorFields(error) {
+  return {
+    error: String(error?.message || error).slice(0, 1_000),
+    error_code: error?.code || null,
+    error_status: Number.isFinite(Number(error?.status)) ? Number(error.status) : null,
+    error_provider_code: Number.isFinite(Number(error?.metaCode)) ? Number(error.metaCode) : null,
+    error_provider_subcode: Number.isFinite(Number(error?.metaSubcode))
+      ? Number(error.metaSubcode)
+      : null,
+    error_provider_transient: error?.metaIsTransient === true,
+  };
 }
 
 async function sendMessageBody(url, body, fallbackBody = null) {
@@ -567,9 +739,11 @@ async function sendMessageBody(url, body, fallbackBody = null) {
         primary_error: primary.data,
       };
     }
-    throw new Error(`Meta message failed ${primary.status}: ${JSON.stringify(primary.data)}; fallback failed ${fallback.status}: ${JSON.stringify(fallback.data)}`);
+    const error = providerError("Provider message failed", fallback.status, fallback.data);
+    error.message = `Provider message failed ${primary.status}: ${JSON.stringify(primary.data)}; fallback failed ${fallback.status}: ${JSON.stringify(fallback.data)}`;
+    throw error;
   }
-  throw new Error(`Meta message failed ${primary.status}: ${JSON.stringify(primary.data)}`);
+  throw providerError("Provider message failed", primary.status, primary.data);
 }
 
 async function sendPrivateReply(comment, text, quickReplies = []) {
@@ -625,7 +799,7 @@ async function sendPublicCommentReply(comment, text) {
     data = { raw: responseText };
   }
   if (!response.ok) {
-    throw new Error(`Meta comment reply failed ${response.status}: ${JSON.stringify(data)}`);
+    throw providerError("Provider comment reply failed", response.status, data);
   }
   return data;
 }
@@ -703,7 +877,10 @@ async function recordWebhookReceipt(payload, comments, messages) {
 }
 
 async function recordWebhookAttempt(status, body, req) {
-  const signature = req.headers["x-hub-signature-256"] || req.headers["x-hub-signature"] || "";
+  const signature = req.headers["x-hookmyapp-signature-256"]
+    || req.headers["x-hub-signature-256"]
+    || req.headers["x-hub-signature"]
+    || "";
   await mkdir(dirname(env.webhookLogFile), { recursive: true, mode: 0o700 });
   await appendFile(env.webhookLogFile, `${JSON.stringify({
     at: new Date().toISOString(),
@@ -711,6 +888,10 @@ async function recordWebhookAttempt(status, body, req) {
     bytes: body.length,
     signature_scheme: String(signature).split("=")[0] || null,
     signature_length: String(signature).length,
+    provider: (
+      req.headers["x-hookmyapp-signature-256"]
+      || req.headers["x-hookmyapp-probe"]
+    ) ? "hookmyapp" : "meta",
     user_agent: req.headers["user-agent"] || null,
   })}\n`, { mode: 0o600 });
 }
@@ -917,6 +1098,25 @@ function readNonFollowerPromptCountsFromEvents(events) {
   return counts;
 }
 
+function readRecentMessageActionsFromEvents(events, nowMs = Date.now()) {
+  const recent = new Set();
+  const cutoff = nowMs - 60_000;
+  for (const event of events) {
+    if (
+      event.status !== "message_sent"
+      || !event.from_id
+      || !event.media_id
+      || !event.keyword
+      || event.follower_state !== false
+      || eventTimestamp(event) < cutoff
+    ) {
+      continue;
+    }
+    recent.add(`${event.from_id}:${event.media_id}:${event.keyword}`);
+  }
+  return recent;
+}
+
 async function readDeliveryState() {
   return readDeliveryStateFromEvents(await readStateEvents());
 }
@@ -929,9 +1129,77 @@ function serializeProcessing(task) {
   return run;
 }
 
+function queueEvent(type, value) {
+  const { raw: _raw, ...payload } = value;
+  return {
+    type,
+    external_id: type === "comment" ? payload.commentId : payload.messageId,
+    received_at: new Date().toISOString(),
+    payload,
+  };
+}
+
+async function enqueueEvents(comments, messages) {
+  const queued = [];
+  for (const comment of comments) {
+    const event = queueEvent("comment", comment);
+    const result = await durableInbox.enqueue(event);
+    queued.push({ type: "comment", external_id: event.external_id, ...result });
+  }
+  for (const message of messages) {
+    const event = queueEvent("message", message);
+    const result = await durableInbox.enqueue(event);
+    queued.push({ type: "message", external_id: event.external_id, ...result });
+  }
+  return queued;
+}
+
+export async function processQueuedEvent(event) {
+  const options = { propagateErrors: true };
+  if (event.type === "comment") return processComments([event.payload], null, options);
+  if (event.type === "message") return processMessages([event.payload], null, options);
+  const error = new Error(`Unsupported queue event type: ${event.type}`);
+  error.code = "CTA_UNSUPPORTED_EVENT";
+  throw error;
+}
+
+export async function runRecoveryOnce(options = {}) {
+  return recoveryWorker.runDue(options);
+}
+
+export async function recoverInterruptedEvents() {
+  return recoveryWorker.recoverInterrupted();
+}
+
+export async function queueSummary() {
+  return durableInbox.summary();
+}
+
+export async function listDeadLetters(options = {}) {
+  return durableInbox.listDeadLetters(options);
+}
+
+export async function replayDeadLetter(eventKey) {
+  return durableInbox.replay(eventKey);
+}
+
+export async function resolveDeadLetter(eventKey, reason) {
+  return durableInbox.resolveDeadLetter(eventKey, reason);
+}
+
 async function handlePost(req, res) {
   const body = await readBody(req);
-  if (!verifySignature(body, req.headers["x-hub-signature-256"])) {
+  if (isHookMyAppVerificationProbe(req, body)) {
+    await recordWebhookAttempt("verification_probe", body, req);
+    res.writeHead(200).end("ok");
+    return;
+  }
+  if (req.headers["x-hookmyapp-probe"]) {
+    await recordWebhookAttempt("bad_verification_probe", body, req);
+    res.writeHead(403).end("bad verification probe");
+    return;
+  }
+  if (!verifyInboundSignature(body, req.headers)) {
     await recordWebhookAttempt("bad_signature", body, req);
     res.writeHead(403).end("bad signature");
     return;
@@ -948,22 +1216,13 @@ async function handlePost(req, res) {
 
   const comments = extractComments(payload);
   const messages = extractMessages(payload);
+  const queued = await enqueueEvents(comments, messages);
   await recordWebhookReceipt(payload, comments, messages);
-  const { commentResults, messageResults } = await serializeProcessing(async () => {
-    const routes = await loadRoutes();
-    return {
-      commentResults: await processComments(comments, routes),
-      messageResults: await processMessages(messages, routes),
-    };
-  });
-
-  const results = [...commentResults, ...messageResults];
-  const failed = results.some((result) => String(result.status || "").includes("error"));
-  res.writeHead(failed ? 503 : 200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ ok: !failed, results, comments: commentResults, messages: messageResults }));
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ ok: true, queued }));
 }
 
-export async function processComments(comments, routes = null) {
+export async function processComments(comments, routes = null, options = {}) {
   const activeRoutes = routes || await loadRoutes();
   const stateEvents = await readStateEvents();
   const deliveryState = readDeliveryStateFromEvents(stateEvents);
@@ -1027,13 +1286,18 @@ export async function processComments(comments, routes = null) {
           follower_state: resolvedComment.followerState,
           ...attribution,
           funnel_event: "cta_delivery_failed",
-          error: error.message,
+          ...processingErrorFields(error),
         });
       }
     }
 
     if (dmError) {
-      results.push({ commentId: resolvedComment.commentId, keyword: route.keyword, status: "dm_error" });
+      if (options.propagateErrors) throw dmError;
+      results.push({
+        commentId: resolvedComment.commentId,
+        keyword: route.keyword,
+        status: "dm_error",
+      });
       continue;
     }
 
@@ -1048,8 +1312,9 @@ export async function processComments(comments, routes = null) {
           comment_id: resolvedComment.commentId,
           media_id: resolvedComment.mediaId,
           dm_sent: delivery.dmSent,
-          error: error.message,
+          ...processingErrorFields(error),
         });
+        if (options.propagateErrors) throw error;
         results.push({
           commentId: resolvedComment.commentId,
           keyword: route.keyword,
@@ -1151,13 +1416,14 @@ async function processGenericMessage(message) {
   return null;
 }
 
-export async function processMessages(messages, routes = null) {
+export async function processMessages(messages, routes = null, options = {}) {
   const activeRoutes = routes || await loadRoutes();
   const stateEvents = await readStateEvents();
   const handledMessageIds = readHandledMessageIdsFromEvents(stateEvents);
   const pendingFollowUpsByUser = readPendingFollowUpsByUserFromEvents(stateEvents);
   const deliveredGuideKeys = readDeliveredGuideKeysFromEvents(stateEvents);
   const nonFollowerPromptCounts = readNonFollowerPromptCountsFromEvents(stateEvents);
+  const recentMessageActions = readRecentMessageActionsFromEvents(stateEvents);
   const handledRouteActions = new Set();
   const results = [];
 
@@ -1207,7 +1473,14 @@ export async function processMessages(messages, routes = null) {
       results.push({ messageId: message.messageId, keyword: route.keyword, status: "skipped_guide_delivered" });
       continue;
     }
-    if (handledRouteActions.has(routeActionKey)) {
+    if (
+      handledRouteActions.has(routeActionKey)
+      || (
+        source === "follow_up"
+        && !message.payload
+        && recentMessageActions.has(routeActionKey)
+      )
+    ) {
       await recordEvent({
         status: "message_skipped_duplicate_action",
         keyword: route.keyword,
@@ -1290,22 +1563,27 @@ export async function processMessages(messages, routes = null) {
         payload: message.payload,
         ...attribution,
         funnel_event: "cta_delivery_failed",
-        error: error.message,
+        ...processingErrorFields(error),
       });
-      results.push({ messageId: message.messageId, keyword: route.keyword, status: "error" });
+      if (options.propagateErrors) throw error;
+      results.push({
+        messageId: message.messageId,
+        keyword: route.keyword,
+        status: "error",
+      });
     }
   }
 
   return results;
 }
 
-export async function processPendingFollowGate(routes = null) {
+export async function processPendingFollowGate(routes = null, now = new Date()) {
   const activeRoutes = routes || await loadRoutes();
   const stateEvents = await readStateEvents();
   const pending = readPendingFollowGateFromEvents(stateEvents);
   const results = [];
   const latestByUser = new Map();
-  const minTs = Date.now() - env.followGateMaxAgeDays * 24 * 60 * 60 * 1000;
+  const minTs = now.getTime() - env.followGateMaxAgeDays * 24 * 60 * 60 * 1000;
 
   for (const item of pending.values()) {
     if (eventTimestamp(item) < minTs) continue;
@@ -1355,9 +1633,14 @@ export async function processPendingFollowGate(routes = null) {
         follower_state: true,
         ...attribution,
         funnel_event: "cta_delivery_failed",
-        error: error.message,
+        ...processingErrorFields(error),
       });
-      results.push({ fromId: item.from_id, keyword: route.keyword, status: "error" });
+      results.push({
+        fromId: item.from_id,
+        keyword: route.keyword,
+        status: "error",
+        ...processingErrorFields(error),
+      });
     }
   }
 
@@ -1365,6 +1648,15 @@ export async function processPendingFollowGate(routes = null) {
 }
 
 function handleVerify(req, res, url) {
+  if (isHookMyAppVerificationProbe(req)) {
+    if (!env.verifyToken) {
+      res.writeHead(403).end("HookMyApp verification is not configured");
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end(env.verifyToken);
+    return;
+  }
   const mode = url.searchParams.get("hub.mode");
   const token = url.searchParams.get("hub.verify_token");
   const challenge = url.searchParams.get("hub.challenge");
@@ -1378,6 +1670,64 @@ function handleVerify(req, res, url) {
   res.writeHead(403).end("verification failed");
 }
 
+function adminAuthorized(req) {
+  if (!env.adminToken) return env.dryRun;
+  const authorization = String(req.headers.authorization || "");
+  if (!authorization.startsWith("Bearer ")) return false;
+  const supplied = Buffer.from(authorization.slice("Bearer ".length));
+  const expected = Buffer.from(env.adminToken);
+  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+}
+
+function sendJson(res, status, body) {
+  res.writeHead(status, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(body));
+}
+
+async function handleAdmin(req, res, url) {
+  if (!adminAuthorized(req)) {
+    sendJson(res, 401, { ok: false, error: "unauthorized" });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/admin/recover") {
+    const recoveredInterrupted = await recoverInterruptedEvents();
+    sendJson(res, 200, {
+      ok: true,
+      recovered_interrupted: recoveredInterrupted,
+      result: await runRecoveryOnce({ limit: 100 }),
+    });
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/admin/dead-letter") {
+    sendJson(res, 200, { ok: true, entries: await listDeadLetters() });
+    return;
+  }
+  const match = url.pathname.match(
+    /^\/admin\/dead-letter\/([a-f0-9]{64})\/(retry|resolve)$/,
+  );
+  if (req.method === "POST" && match) {
+    const [, eventKey, action] = match;
+    if (action === "retry") {
+      const replayed = await replayDeadLetter(eventKey);
+      if (replayed) void runRecoveryOnce().catch(() => {});
+      sendJson(res, replayed ? 200 : 404, { ok: replayed, event_key: eventKey });
+      return;
+    }
+    const body = await readBody(req);
+    let parsed = {};
+    try {
+      parsed = body.length ? JSON.parse(body.toString("utf8")) : {};
+    } catch {
+      sendJson(res, 400, { ok: false, error: "bad json" });
+      return;
+    }
+    const resolved = await resolveDeadLetter(eventKey, parsed.reason || "operator acknowledged");
+    sendJson(res, resolved ? 200 : 404, { ok: resolved, event_key: eventKey });
+    return;
+  }
+  sendJson(res, 404, { ok: false, error: "unknown admin action" });
+}
+
 export function createServer() {
   assertConfig();
   return http.createServer(async (req, res) => {
@@ -1385,27 +1735,79 @@ export function createServer() {
       const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
       if (req.method === "GET" && url.pathname === "/webhook") return handleVerify(req, res, url);
       if (req.method === "POST" && url.pathname === "/webhook") return await handlePost(req, res);
+      if (url.pathname.startsWith("/admin/")) return await handleAdmin(req, res, url);
       if (req.method === "GET" && url.pathname === "/health") {
         const deliveryErrors = summarizeRecentDeliveryErrors(await readStateEvents());
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({
-          ok: true,
+        const queue = await durableInbox.summary();
+        const recovery = recoveryWorker.snapshot();
+        const publicRecovery = {
+          running: recovery.running,
+          started: recovery.started,
+          last_run_at: recovery.last_run_at,
+          last_result: recovery.last_result ? {
+            processed: recovery.last_result.processed,
+            completed: recovery.last_result.completed,
+            retried: recovery.last_result.retried,
+            dead_lettered: recovery.last_result.dead_lettered,
+          } : null,
+          last_error_present: Boolean(recovery.last_error),
+          recovered_interrupted_count: recovery.recovered_interrupted_count,
+        };
+        const oldestPendingMs = queue.oldest_pending_at
+          ? Date.now() - Date.parse(queue.oldest_pending_at)
+          : 0;
+        const issues = [];
+        if (queue.dead_letter_count > 0) issues.push("dead_letter");
+        if (oldestPendingMs > 15 * 60 * 1000) issues.push("pending_event_stale");
+        if (queue.processing_count > 0 && !recovery.running) {
+          issues.push("processing_event_interrupted");
+        }
+        const reconciliationOverdue = (
+          env.reconcileEnabled
+          && pollCredentialsConfigured()
+          && pollStatus.nextReconciliationAt
+          && Date.now() > (
+            Date.parse(pollStatus.nextReconciliationAt)
+            + Math.max(60_000, env.reconcileRetryMs)
+          )
+        );
+        if (
+          env.reconcileEnabled
+          && pollCredentialsConfigured()
+          && pollStatus.reconciliationConsecutiveFailures >= 3
+        ) {
+          issues.push("reconciliation_failed");
+        }
+        if (reconciliationOverdue) issues.push("reconciliation_stale");
+        const healthy = issues.length === 0;
+        sendJson(res, healthy ? 200 : 503, {
+          ok: healthy,
+          issues,
+          provider: env.provider,
           dry_run: env.dryRun,
           poll_enabled: env.pollEnabled,
           poll_configured: pollCredentialsConfigured(),
           poll_interval_ms: env.pollIntervalMs,
           poll_since_iso: pollStatus.sinceIso,
           poll_last_run_at: pollStatus.lastRunAt,
-          poll_last_error: pollStatus.lastError,
           poll_last_media_count: pollStatus.mediaCount,
           poll_last_comment_count: pollStatus.commentCount,
           poll_last_message_count: pollStatus.messageCount,
           poll_last_result_count: pollStatus.resultCount,
+          reconciliation_enabled: env.reconcileEnabled,
+          reconciliation_interval_ms: env.reconcileIntervalMs,
+          reconciliation_last_run_at: pollStatus.lastReconciliationAt,
+          reconciliation_last_attempt_at: pollStatus.lastReconciliationAttemptAt,
+          reconciliation_last_failure_at: pollStatus.lastReconciliationFailureAt,
+          reconciliation_consecutive_failures: pollStatus.reconciliationConsecutiveFailures,
+          reconciliation_next_run_at: pollStatus.nextReconciliationAt,
           ...deliveryErrors,
           follow_gate_enabled: env.followGateEnabled,
           follow_gate_mode: "guide_only",
           follow_gate_last_result_count: pollStatus.followGateResultCount,
-        }));
+          queue,
+          recovery: publicRecovery,
+        });
         return;
       }
       res.writeHead(404).end("not found");
@@ -1433,7 +1835,7 @@ async function graphGet(path, params = {}) {
   });
   const data = await response.json();
   if (!response.ok) {
-    throw new Error(`Meta poll failed ${response.status}: ${JSON.stringify(data)}`);
+    throw providerError("Provider poll failed", response.status, data);
   }
   return data;
 }
@@ -1441,14 +1843,17 @@ async function graphGet(path, params = {}) {
 async function graphGetPages(path, params, maxPages, stopAfterPage = null) {
   const rows = [];
   let after = null;
+  const seenCursors = new Set();
   for (let pageNumber = 0; pageNumber < maxPages; pageNumber += 1) {
     const data = await graphGet(path, { ...params, after });
     const page = Array.isArray(data.data) ? data.data : [];
     rows.push(...page);
     if (stopAfterPage?.(page)) break;
     if (!data.paging?.next) break;
-    after = data.paging?.cursors?.after || null;
-    if (!after) break;
+    const nextAfter = data.paging?.cursors?.after || null;
+    if (!nextAfter || nextAfter === after || seenCursors.has(nextAfter)) break;
+    seenCursors.add(nextAfter);
+    after = nextAfter;
   }
   return rows;
 }
@@ -1621,23 +2026,29 @@ export async function pollOnce() {
   comments.sort((a, b) => commentTime(a) - commentTime(b));
   const conversations = await fetchRecentConversations(messageSinceIso);
   const messages = messagesFromPolledConversations(conversations, messageSinceIso);
-  const { commentResults, messageResults } = await serializeProcessing(async () => {
-    const results = {
-      commentResults: await processComments(comments),
-      messageResults: await processMessages(messages),
-    };
+  const results = await serializeProcessing(async () => {
+    const queued = await enqueueEvents(comments, messages);
+    const recovery = await runRecoveryOnce({ limit: Math.max(25, queued.length + 5) });
     await writePollCursor(scanStartedAt);
     await writeMessagePollCursor(scanStartedAt);
-    return results;
+    const duplicates = queued
+      .filter((entry) => entry.duplicate)
+      .map((entry) => ({
+        type: entry.type,
+        ...(entry.type === "comment"
+          ? { commentId: entry.external_id }
+          : { messageId: entry.external_id }),
+        status: "skipped_duplicate",
+      }));
+    return [...recovery.results, ...duplicates];
   });
   pollStatus.lastRunAt = new Date().toISOString();
-  pollStatus.lastError = null;
   pollStatus.sinceIso = scanStartedAt;
   pollStatus.mediaCount = mediaItems.length;
   pollStatus.commentCount = comments.length;
   pollStatus.messageCount = messages.length;
-  pollStatus.resultCount = commentResults.length + messageResults.length;
-  return [...commentResults, ...messageResults];
+  pollStatus.resultCount = results.length;
+  return results.map(({ event_key: _eventKey, type: _type, external_id: _externalId, ...result }) => result);
 }
 
 function startPollLoop() {
@@ -1657,8 +2068,6 @@ function startPollLoop() {
         console.log(`instagram follow gate guide-only checked ${followGateResults.length} pending users`);
       }
     } catch (error) {
-      pollStatus.lastRunAt = new Date().toISOString();
-      pollStatus.lastError = error.message;
       console.error(`instagram poll error: ${error.message}`);
     } finally {
       running = false;
@@ -1668,8 +2077,68 @@ function startPollLoop() {
   run();
 }
 
-export function startServer() {
+export function startReconciliationLoop() {
+  console.log(`instagram reconciliation enabled every ${env.reconcileIntervalMs}ms`);
+  let running = false;
+  let stopped = false;
+  let timer = null;
+  let activeRun = Promise.resolve();
+  const scheduleNext = (delayMs) => {
+    if (stopped) return;
+    pollStatus.nextReconciliationAt = new Date(Date.now() + delayMs).toISOString();
+    timer = setTimeout(() => {
+      activeRun = run();
+    }, delayMs);
+    timer.unref?.();
+  };
+  const run = async () => {
+    if (running) return;
+    running = true;
+    let nextDelay = env.reconcileIntervalMs;
+    pollStatus.lastReconciliationAttemptAt = new Date().toISOString();
+    try {
+      const results = await pollOnce();
+      pollStatus.lastReconciliationAt = new Date().toISOString();
+      pollStatus.lastReconciliationFailureAt = null;
+      pollStatus.reconciliationConsecutiveFailures = 0;
+      console.log(`instagram reconciliation completed with ${results.length} results`);
+    } catch (error) {
+      nextDelay = env.reconcileRetryMs;
+      pollStatus.lastReconciliationFailureAt = new Date().toISOString();
+      pollStatus.reconciliationConsecutiveFailures += 1;
+      console.error(`instagram reconciliation error: ${String(error?.message || error).slice(0, 1_000)}`);
+    } finally {
+      running = false;
+      scheduleNext(nextDelay);
+      try {
+        await persistReconciliationStatus();
+      } catch (error) {
+        console.error(`could not persist reconciliation status: ${String(error?.message || error).slice(0, 500)}`);
+      }
+    }
+  };
+  const savedNextMs = Date.parse(pollStatus.nextReconciliationAt || "");
+  const initialDelay = Number.isFinite(savedNextMs)
+    ? Math.max(1, savedNextMs - Date.now())
+    : env.reconcileIntervalMs;
+  scheduleNext(initialDelay);
+  void persistReconciliationStatus().catch((error) => {
+    console.error(`could not persist reconciliation schedule: ${String(error?.message || error).slice(0, 500)}`);
+  });
+  return async () => {
+    stopped = true;
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+    await activeRun;
+    pollStatus.nextReconciliationAt = null;
+    await persistReconciliationStatus();
+  };
+}
+
+export async function startServer() {
   assertConfig();
+  await loadReconciliationStatus();
+  await recoveryWorker.start();
   const server = createServer();
   server.listen(env.port, env.host, () => {
     console.log(`instagram-cta listening on http://${env.host}:${env.port}`);
@@ -1677,11 +2146,13 @@ export function startServer() {
       startPollLoop();
     } else if (env.pollEnabled) {
       console.log("instagram polling paused until IG_USER_ID and IG_ACCESS_TOKEN are configured");
+    } else if (env.reconcileEnabled && pollCredentialsConfigured()) {
+      startReconciliationLoop();
     }
   });
   return server;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  startServer();
+  await startServer();
 }
