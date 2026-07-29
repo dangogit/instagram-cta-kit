@@ -3,7 +3,7 @@ import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const cli = resolve(root, "bin/instagram-cta.mjs");
@@ -16,9 +16,17 @@ const env = await readFile(join(home, ".env"), "utf8");
 assert.match(env, /DEFAULT_LOCALE=he/);
 assert.match(env, /POLL_ENABLED=1/);
 assert.match(env, /DRY_RUN=1/);
+assert.match(env, /CTA_PROVIDER=hookmyapp/);
+assert.match(env, /INSTAGRAM_GRAPH_API_URL=/);
+assert.match(env, /WEBHOOK_HMAC_SECRET=/);
+assert.match(env, /CTA_ADMIN_TOKEN=[a-f0-9]{64}/);
+assert.match(env, /CTA_QUEUE_DIR=\.\/state\/inbox/);
+assert.match(env, /RECONCILIATION_STATUS_FILE=\.\/state\/reconciliation-status\.json/);
 assert.doesNotMatch(env, /replace-with-a-random-webhook-verify-token/);
-assert.equal((await stat(join(home, ".env"))).mode & 0o777, 0o600);
-assert.equal((await stat(join(home, "routes.json"))).mode & 0o777, 0o644);
+if (process.platform !== "win32") {
+  assert.equal((await stat(join(home, ".env"))).mode & 0o777, 0o600);
+  assert.equal((await stat(join(home, "routes.json"))).mode & 0o777, 0o644);
+}
 
 const routes = JSON.parse(await readFile(join(home, "routes.json"), "utf8"));
 assert.equal(routes.routes.length, 2);
@@ -73,5 +81,55 @@ await writeFile(join(home, "routes.json"), `${JSON.stringify(updated, null, 2)}\
 const aliasCollision = spawnSync(process.execPath, [cli, "routes", "validate", "--dir", home], { encoding: "utf8" });
 assert.notEqual(aliasCollision.status, 0);
 assert.match(aliasCollision.stderr, /duplicate keyword or alias/);
+
+const metaHome = await mkdtemp(join(tmpdir(), "instagram-cta-cli-meta-"));
+const metaInit = spawnSync(process.execPath, [
+  cli,
+  "init",
+  "--dir",
+  metaHome,
+  "--provider",
+  "meta",
+  "--locale",
+  "en",
+  "--mode",
+  "polling",
+], { encoding: "utf8" });
+assert.equal(metaInit.status, 0, metaInit.stderr);
+const metaEnv = await readFile(join(metaHome, ".env"), "utf8");
+assert.match(metaEnv, /CTA_PROVIDER=meta/);
+assert.match(metaEnv, /META_APP_SECRET=/);
+assert.match(metaEnv, /IG_ACCESS_TOKEN=/);
+assert.doesNotMatch(metaEnv, /HOOKMYAPP_CHANNEL_ID=/);
+const metaDoctor = spawnSync(process.execPath, [cli, "doctor", "--dir", metaHome], { encoding: "utf8" });
+assert.equal(metaDoctor.status, 0, `${metaDoctor.stdout}\n${metaDoctor.stderr}`);
+
+const serverUrl = pathToFileURL(resolve(root, "src/server.mjs")).href;
+const boundaryEnv = {
+  ...process.env,
+  HOST: "0.0.0.0",
+  ALLOW_INSECURE_HTTP: "0",
+  DRY_RUN: "1",
+  VERIFY_TOKEN: "boundary-test",
+  ROUTES_FILE: join(home, "routes.json"),
+  STATE_FILE: join(home, "state", "boundary-events.jsonl"),
+};
+const blockedBind = spawnSync(process.execPath, [
+  "--input-type=module",
+  "-e",
+  `const module = await import(${JSON.stringify(serverUrl)}); module.createServer();`,
+], { encoding: "utf8", env: boundaryEnv });
+assert.notEqual(blockedBind.status, 0);
+assert.match(blockedBind.stderr, /non-loopback HOST requires ALLOW_INSECURE_HTTP=1/);
+
+const allowedBind = spawnSync(process.execPath, [
+  "--input-type=module",
+  "-e",
+  `const module = await import(${JSON.stringify(serverUrl)}); module.createServer();`,
+], {
+  encoding: "utf8",
+  env: { ...boundaryEnv, ALLOW_INSECURE_HTTP: "1" },
+});
+assert.equal(allowedBind.status, 0, allowedBind.stderr);
 
 console.log("cli.test.mjs passed");

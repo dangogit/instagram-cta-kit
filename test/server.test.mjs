@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHmac } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -44,7 +44,7 @@ await writeFile(join(tmp, "routes.json"), JSON.stringify({
 process.env.PORT = "0";
 process.env.HOST = "127.0.0.1";
 process.env.VERIFY_TOKEN = "verify-me";
-process.env.META_APP_SECRET = "secret";
+process.env.META_APP_SECRET = randomBytes(32).toString("hex");
 process.env.IG_USER_ID = "1789";
 process.env.IG_ACCESS_TOKEN = "token";
 process.env.ROUTES_FILE = join(tmp, "routes.json");
@@ -84,11 +84,26 @@ await writeFile(stateFile, [
   },
 ].map((event) => JSON.stringify(event)).join("\n") + "\n");
 
-const { createServer } = await import("../src/server.mjs");
+const { createServer, runRecoveryOnce } = await import("../src/server.mjs");
 const server = createServer().listen(0, "127.0.0.1");
 await once(server, "listening");
 const { port } = server.address();
 const base = `http://127.0.0.1:${port}`;
+
+async function readWebhookResult(response) {
+  const acknowledgement = await response.json();
+  const recovery = await runRecoveryOnce({ limit: 100 });
+  const duplicates = acknowledgement.queued
+    .filter((entry) => entry.duplicate)
+    .map((entry) => ({ type: entry.type, status: "skipped_duplicate" }));
+  const results = [...recovery.results, ...duplicates];
+  return {
+    ...acknowledgement,
+    results,
+    comments: results.filter((entry) => entry.type === "comment"),
+    messages: results.filter((entry) => entry.type === "message"),
+  };
+}
 
 const verify = await fetch(`${base}/webhook?hub.mode=subscribe&hub.verify_token=verify-me&hub.challenge=12345`);
 assert.equal(await verify.text(), "12345");
@@ -121,7 +136,7 @@ const payload = {
 };
 
 const body = JSON.stringify(payload);
-const sig = createHmac("sha256", "secret").update(body).digest("hex");
+const sig = createHmac("sha256", process.env.META_APP_SECRET).update(body).digest("hex");
 const post = await fetch(`${base}/webhook`, {
   method: "POST",
   headers: {
@@ -131,7 +146,7 @@ const post = await fetch(`${base}/webhook`, {
   body,
 });
 assert.equal(post.status, 200);
-const result = await post.json();
+const result = await readWebhookResult(post);
 assert.equal(result.results[0].keyword, "AGENTIC");
 assert.equal(result.results[0].status, "sent");
 
@@ -155,7 +170,7 @@ const duplicate = await fetch(`${base}/webhook`, {
   body,
 });
 assert.equal(duplicate.status, 200);
-const duplicateResult = await duplicate.json();
+const duplicateResult = await readWebhookResult(duplicate);
 assert.equal(duplicateResult.results[0].status, "skipped_duplicate");
 
 const nonFollowerPayload = {
@@ -178,7 +193,7 @@ const nonFollowerPayload = {
   ],
 };
 const nonFollowerBody = JSON.stringify(nonFollowerPayload);
-const nonFollowerSig = createHmac("sha256", "secret").update(nonFollowerBody).digest("hex");
+const nonFollowerSig = createHmac("sha256", process.env.META_APP_SECRET).update(nonFollowerBody).digest("hex");
 const nonFollowerPost = await fetch(`${base}/webhook`, {
   method: "POST",
   headers: {
@@ -188,7 +203,7 @@ const nonFollowerPost = await fetch(`${base}/webhook`, {
   body: nonFollowerBody,
 });
 assert.equal(nonFollowerPost.status, 200);
-const nonFollowerResult = await nonFollowerPost.json();
+const nonFollowerResult = await readWebhookResult(nonFollowerPost);
 assert.equal(nonFollowerResult.results[0].keyword, "AGENT");
 assert.equal(nonFollowerResult.results[0].status, "sent");
 
@@ -212,7 +227,7 @@ const aliasPayload = {
   ],
 };
 const aliasBody = JSON.stringify(aliasPayload);
-const aliasSig = createHmac("sha256", "secret").update(aliasBody).digest("hex");
+const aliasSig = createHmac("sha256", process.env.META_APP_SECRET).update(aliasBody).digest("hex");
 const aliasPost = await fetch(`${base}/webhook`, {
   method: "POST",
   headers: {
@@ -222,7 +237,7 @@ const aliasPost = await fetch(`${base}/webhook`, {
   body: aliasBody,
 });
 assert.equal(aliasPost.status, 200);
-const aliasResult = await aliasPost.json();
+const aliasResult = await readWebhookResult(aliasPost);
 assert.equal(aliasResult.results[0].keyword, "DUO");
 assert.equal(aliasResult.results[0].status, "sent");
 
@@ -246,7 +261,7 @@ const typoPayload = {
   ],
 };
 const typoBody = JSON.stringify(typoPayload);
-const typoSig = createHmac("sha256", "secret").update(typoBody).digest("hex");
+const typoSig = createHmac("sha256", process.env.META_APP_SECRET).update(typoBody).digest("hex");
 const typoPost = await fetch(`${base}/webhook`, {
   method: "POST",
   headers: {
@@ -256,7 +271,7 @@ const typoPost = await fetch(`${base}/webhook`, {
   body: typoBody,
 });
 assert.equal(typoPost.status, 200);
-const typoResult = await typoPost.json();
+const typoResult = await readWebhookResult(typoPost);
 assert.equal(typoResult.results[0].keyword, "AGENT");
 assert.equal(typoResult.results[0].status, "sent");
 
@@ -280,7 +295,7 @@ const ambiguousTypoPayload = {
   ],
 };
 const ambiguousTypoBody = JSON.stringify(ambiguousTypoPayload);
-const ambiguousTypoSig = createHmac("sha256", "secret").update(ambiguousTypoBody).digest("hex");
+const ambiguousTypoSig = createHmac("sha256", process.env.META_APP_SECRET).update(ambiguousTypoBody).digest("hex");
 const ambiguousTypoPost = await fetch(`${base}/webhook`, {
   method: "POST",
   headers: {
@@ -290,7 +305,7 @@ const ambiguousTypoPost = await fetch(`${base}/webhook`, {
   body: ambiguousTypoBody,
 });
 assert.equal(ambiguousTypoPost.status, 200);
-const ambiguousTypoResult = await ambiguousTypoPost.json();
+const ambiguousTypoResult = await readWebhookResult(ambiguousTypoPost);
 assert.equal(ambiguousTypoResult.results[0].status, "ignored");
 
 const followUpPayload = {
@@ -313,7 +328,7 @@ const followUpPayload = {
   ],
 };
 const followUpBody = JSON.stringify(followUpPayload);
-const followUpSig = createHmac("sha256", "secret").update(followUpBody).digest("hex");
+const followUpSig = createHmac("sha256", process.env.META_APP_SECRET).update(followUpBody).digest("hex");
 const followUpPost = await fetch(`${base}/webhook`, {
   method: "POST",
   headers: {
@@ -323,7 +338,7 @@ const followUpPost = await fetch(`${base}/webhook`, {
   body: followUpBody,
 });
 assert.equal(followUpPost.status, 200);
-const followUpResult = await followUpPost.json();
+const followUpResult = await readWebhookResult(followUpPost);
 assert.equal(followUpResult.results[0].keyword, "AGENT");
 assert.equal(followUpResult.results[0].status, "sent");
 
@@ -348,7 +363,7 @@ const quickReplyPayload = {
   ],
 };
 const quickReplyBody = JSON.stringify(quickReplyPayload);
-const quickReplySig = createHmac("sha256", "secret").update(quickReplyBody).digest("hex");
+const quickReplySig = createHmac("sha256", process.env.META_APP_SECRET).update(quickReplyBody).digest("hex");
 const quickReplyPost = await fetch(`${base}/webhook`, {
   method: "POST",
   headers: {
@@ -358,7 +373,7 @@ const quickReplyPost = await fetch(`${base}/webhook`, {
   body: quickReplyBody,
 });
 assert.equal(quickReplyPost.status, 200);
-const quickReplyResult = await quickReplyPost.json();
+const quickReplyResult = await readWebhookResult(quickReplyPost);
 assert.equal(quickReplyResult.messages[0].keyword, "AGENT");
 assert.equal(quickReplyResult.messages[0].status, "skipped_guide_delivered");
 
@@ -382,7 +397,7 @@ const retryPublicPayload = {
   ],
 };
 const retryPublicBody = JSON.stringify(retryPublicPayload);
-const retryPublicSig = createHmac("sha256", "secret").update(retryPublicBody).digest("hex");
+const retryPublicSig = createHmac("sha256", process.env.META_APP_SECRET).update(retryPublicBody).digest("hex");
 const retryPublicPost = await fetch(`${base}/webhook`, {
   method: "POST",
   headers: {
@@ -392,7 +407,7 @@ const retryPublicPost = await fetch(`${base}/webhook`, {
   body: retryPublicBody,
 });
 assert.equal(retryPublicPost.status, 200);
-const retryPublicResult = await retryPublicPost.json();
+const retryPublicResult = await readWebhookResult(retryPublicPost);
 assert.equal(retryPublicResult.results[0].keyword, "AGENT");
 assert.equal(retryPublicResult.results[0].status, "sent");
 
@@ -418,7 +433,7 @@ const storyReplyPayload = {
   }],
 };
 const storyReplyBody = JSON.stringify(storyReplyPayload);
-const storyReplySig = createHmac("sha256", "secret").update(storyReplyBody).digest("hex");
+const storyReplySig = createHmac("sha256", process.env.META_APP_SECRET).update(storyReplyBody).digest("hex");
 const storyReplyPost = await fetch(`${base}/webhook`, {
   method: "POST",
   headers: {
@@ -428,7 +443,7 @@ const storyReplyPost = await fetch(`${base}/webhook`, {
   body: storyReplyBody,
 });
 assert.equal(storyReplyPost.status, 200);
-const storyReplyResult = await storyReplyPost.json();
+const storyReplyResult = await readWebhookResult(storyReplyPost);
 assert.equal(storyReplyResult.messages[0].keyword, "AGENT");
 assert.equal(storyReplyResult.messages[0].status, "sent");
 

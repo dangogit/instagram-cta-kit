@@ -116,9 +116,9 @@ globalThis.fetch = async (url, options = {}) => {
 const { pollOnce, processMessages } = await import("../src/server.mjs");
 
 const first = await pollOnce();
-assert.deepEqual(first, [
+assert.deepEqual(first.map(({ commentId, keyword, status }) => ({ commentId, keyword, status })), [
   { commentId: "comment-1", keyword: "AGENT", status: "sent" },
-  { commentId: "comment-dm-fail", keyword: "AGENT", status: "dm_error" },
+  { commentId: "comment-dm-fail", keyword: undefined, status: "retry_scheduled" },
   { commentId: "comment-followed", keyword: "AGENT", status: "sent" },
 ]);
 
@@ -218,11 +218,14 @@ assert.doesNotMatch(state, /comment-old/);
 
 const second = await pollOnce();
 assert.deepEqual(second, [
-  { commentId: "comment-1", keyword: "AGENT", status: "skipped_duplicate" },
-  { commentId: "comment-dm-fail", keyword: "AGENT", status: "dm_error" },
-  { commentId: "comment-followed", keyword: "AGENT", status: "skipped_duplicate" },
+  { commentId: "comment-1", status: "skipped_duplicate" },
+  { commentId: "comment-dm-fail", status: "skipped_duplicate" },
+  { commentId: "comment-followed", status: "skipped_duplicate" },
 ]);
-assert.equal(calls.filter((call) => call.path.endsWith("/1789/messages")).length, 11);
+assert.equal(calls.filter((call) => (
+  call.path.endsWith("/1789/messages")
+  && call.body?.recipient?.comment_id === "comment-dm-fail"
+)).length, 3);
 assert.equal(calls.filter((call) => call.path.endsWith("/comment-1/replies")).length, 1);
 assert.equal(calls.filter((call) => call.path.endsWith("/comment-dm-fail/replies")).length, 0);
 assert.equal(calls.filter((call) => call.path.endsWith("/comment-followed/replies")).length, 1);

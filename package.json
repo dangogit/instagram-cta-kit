@@ -1,7 +1,7 @@
 {
   "name": "instagram-cta-kit",
-  "version": "0.1.3",
-  "description": "Self-hosted Instagram comment and DM keyword automation using the official Meta API",
+  "version": "0.2.0",
+  "description": "Crash-safe Instagram comment and DM automation for HookMyApp or direct Meta",
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -28,13 +28,16 @@
   "scripts": {
     "start": "node bin/instagram-cta.mjs start",
     "doctor": "node bin/instagram-cta.mjs doctor",
-    "test": "node test/server.test.mjs && node test/poll.test.mjs && node test/poll-cursor.test.mjs && node test/follow-gate.test.mjs && node test/message-poll.test.mjs && node test/story-message.test.mjs && node test/hebrew-keyword.test.mjs && node test/english-locale.test.mjs && node test/pagination.test.mjs && node test/pending-freetext.test.mjs && node test/cli.test.mjs && node test/public-readiness.test.mjs && node test/retry.test.mjs",
+    "test": "node test/server.test.mjs && node test/hookmyapp.test.mjs && node test/reconciliation-health.test.mjs && node test/durable-recovery.test.mjs && node test/poll.test.mjs && node test/poll-cursor.test.mjs && node test/follow-gate.test.mjs && node test/message-poll.test.mjs && node test/story-message.test.mjs && node test/hebrew-keyword.test.mjs && node test/english-locale.test.mjs && node test/pagination.test.mjs && node test/pending-freetext.test.mjs && node test/cli.test.mjs && node test/public-readiness.test.mjs && node test/retry.test.mjs",
     "validate:routes": "node bin/instagram-cta.mjs routes validate",
     "pack:check": "npm pack --dry-run"
   },
   "keywords": [
     "instagram",
+    "hookmyapp",
     "meta",
+    "webhook",
+    "recovery",
     "automation",
     "direct-message",
     "lead-magnet",

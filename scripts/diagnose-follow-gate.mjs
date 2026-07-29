@@ -85,11 +85,15 @@ function pendingFromEvents(events) {
 }
 
 async function graphGet(path, params = {}) {
-  const base = process.env.GRAPH_BASE_URL || "https://graph.instagram.com/v25.0";
+  const base = process.env.INSTAGRAM_GRAPH_API_URL
+    || process.env.GRAPH_BASE_URL
+    || "https://graph.instagram.com/v25.0";
   const url = new URL(`${base}/${path.replace(/^\//, "")}`);
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
   const response = await fetch(url, {
-    headers: { "Authorization": `Bearer ${process.env.IG_ACCESS_TOKEN || ""}` },
+    headers: {
+      "Authorization": `Bearer ${process.env.INSTAGRAM_ACCESS_TOKEN || process.env.IG_ACCESS_TOKEN || ""}`,
+    },
     signal: AbortSignal.timeout(10000),
   });
   const text = await response.text();
@@ -104,11 +108,13 @@ async function graphGet(path, params = {}) {
 
 await loadDotEnv();
 
-if (!process.env.IG_USER_ID || !process.env.IG_ACCESS_TOKEN) {
-  throw new Error("Missing IG_USER_ID or IG_ACCESS_TOKEN");
+const accountId = process.env.INSTAGRAM_ACCOUNT_ID || process.env.IG_USER_ID;
+const accessToken = process.env.INSTAGRAM_ACCESS_TOKEN || process.env.IG_ACCESS_TOKEN;
+if (!accountId || !accessToken) {
+  throw new Error("Missing Instagram account ID or access token");
 }
 
-const account = await graphGet(process.env.IG_USER_ID, { fields: "id,username,name,account_type" });
+const account = await graphGet(accountId, { fields: "id,username,name,account_type" });
 const pending = pendingFromEvents(await readEvents());
 const users = [];
 
