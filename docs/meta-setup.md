@@ -68,6 +68,8 @@ instagram-cta start --dir ./my-instagram-cta
 instagram-cta status --dir ./my-instagram-cta
 ```
 
+`--check-guides` skips routes whose `guide_url` is still a placeholder on `example.com`, including the `GUIDE` and `מדריך` routes seeded by `init`, and prints how many it skipped. Drop them with `instagram-cta route remove GUIDE` once your own keyword works.
+
 Then set `DRY_RUN=0`, restart, and test one account and one keyword.
 
 Confirm the public reply, opt-in DM, user confirmation, final guide, and empty recovery queue. A successful webhook alone is not delivery proof.
