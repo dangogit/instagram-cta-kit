@@ -1,6 +1,6 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { timingSafeEqual } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
 
 // Served at /dashboard by src/server.mjs. Zero dependencies, one HTML page,
 // two JSON endpoints. Auth reuses CTA_ADMIN_TOKEN because the whole server is
@@ -12,16 +12,27 @@ const SUMMARY_CACHE_TTL_MS = 15 * 1000;
 const MEDIA_FIELDS = "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count,username";
 const COOKIE_NAME = "cta_dashboard";
 
-// A guide delivery is the completed "sent" event of the comment flow (dm_sent is
-// the DM leg of the same delivery and would double-count), a follow-gate guide
-// send, or a message-flow send whose funnel event marks an actual guide handoff
-// (message_sent without it is an intro or intent reply).
-export function isGuideDelivery(event) {
-  if (!event || !event.keyword) return false;
-  if (event.status === "sent") return true;
-  if (event.status === "follow_gate_guide_sent") return true;
-  if (event.status === "message_sent") return event.funnel_event === "cta_guide_delivered";
-  return false;
+// Counting guide deliveries needs a join, not a per-event rule. Since the
+// ask-first flow landed, a keyword comment produces dm_sent (funnel_event:
+// cta_conversation_started) plus a bookkeeping "sent" completion event - the
+// guide itself only goes out later as an event stamped cta_guide_delivered.
+// Before that change, "sent" WAS the delivery and no event carried a
+// funnel_event. The two eras are told apart by whether any event of the same
+// comment carries a funnel marker.
+export function buildDeliveryClassifier(events) {
+  const modernComments = new Set();
+  for (const event of events) {
+    if (event?.comment_id && event.funnel_event !== undefined) {
+      modernComments.add(String(event.comment_id));
+    }
+  }
+  return (event) => {
+    if (!event || !event.keyword) return false;
+    if (event.funnel_event === "cta_guide_delivered") return true;
+    if (event.funnel_event !== undefined) return false;
+    if (event.status !== "sent" && event.status !== "follow_gate_guide_sent") return false;
+    return !(event.comment_id && modernComments.has(String(event.comment_id)));
+  };
 }
 
 function isErrorEvent(event) {
@@ -41,11 +52,16 @@ export function buildSummaryFromEvents(events, routes, { now = new Date(), days 
   const todayKey = localDateKey(now);
   const weekAgoMs = nowMs - 7 * dayMs;
   const dayAgoMs = nowMs - dayMs;
+  const isDelivery = buildDeliveryClassifier(events);
 
   const dailyKeys = [];
   const daily = new Map();
   for (let i = days - 1; i >= 0; i -= 1) {
-    const key = localDateKey(new Date(nowMs - i * dayMs));
+    // calendar-day stepping, not ms multiples - DST shifts would otherwise
+    // duplicate one date key and drop another twice a year
+    const d = new Date(now);
+    d.setDate(d.getDate() - i);
+    const key = localDateKey(d);
     dailyKeys.push(key);
     daily.set(key, 0);
   }
@@ -71,8 +87,9 @@ export function buildSummaryFromEvents(events, routes, { now = new Date(), days 
 
   for (const event of events) {
     const atMs = Date.parse(event?.at || "");
-    if (isErrorEvent(event) && Number.isFinite(atMs) && atMs >= dayAgoMs) errors24h += 1;
-    if (isGuideDelivery(event)) {
+    const isReplay = String(event?.message_id || "").startsWith("manual-replay-");
+    if (isErrorEvent(event) && !isReplay && Number.isFinite(atMs) && atMs >= dayAgoMs) errors24h += 1;
+    if (isDelivery(event)) {
       deliveredTotal += 1;
       const stats = routeFor(event.keyword);
       stats.delivered_total += 1;
@@ -95,7 +112,8 @@ export function buildSummaryFromEvents(events, routes, { now = new Date(), days 
         stats.media.set(mediaId, (stats.media.get(mediaId) || 0) + 1);
       }
     }
-    if (isRecentWorthy(event)) recent.push(event);
+    const kind = eventKind(event, isDelivery);
+    if (kind) recent.push({ event, kind });
   }
 
   const routesOut = routes.map((route) => {
@@ -136,23 +154,24 @@ export function buildSummaryFromEvents(events, routes, { now = new Date(), days 
     },
     daily: dailyKeys.map((date) => ({ date, delivered: daily.get(date) })),
     routes: routesOut,
-    recent: recent.slice(-40).reverse().map((event) => ({
+    recent: recent.slice(-40).reverse().map(({ event, kind }) => ({
       at: event.at || null,
       status: event.status,
       keyword: event.keyword || null,
-      funnel_event: event.funnel_event || null,
+      kind,
     })),
   };
 }
 
-function isRecentWorthy(event) {
+function eventKind(event, isDelivery) {
   const status = String(event?.status || "");
-  if (isGuideDelivery(event)) return true;
-  if (isErrorEvent(event)) return true;
-  if (status === "message_sent" && event.keyword) return true;
-  if (status === "follow_gate_reminder_sent") return true;
-  if (status === "human_takeover_detected") return true;
-  return false;
+  if (isDelivery(event)) return "delivery";
+  if (isErrorEvent(event)) return "error";
+  if (event?.funnel_event === "cta_conversation_started") return "conversation";
+  if (status === "message_sent" && event.keyword) return "conversation";
+  if (status === "follow_gate_reminder_sent") return "reminder";
+  if (status === "human_takeover_detected") return "takeover";
+  return null;
 }
 
 function tokenMatches(supplied, expected) {
@@ -166,7 +185,13 @@ function readCookie(req, name) {
   const header = String(req.headers.cookie || "");
   for (const part of header.split(";")) {
     const [key, ...rest] = part.trim().split("=");
-    if (key === name) return decodeURIComponent(rest.join("="));
+    if (key === name) {
+      try {
+        return decodeURIComponent(rest.join("="));
+      } catch {
+        return null;
+      }
+    }
   }
   return null;
 }
@@ -176,12 +201,20 @@ export function createDashboard({ env, readStateEvents, loadRoutes, graphGet, pa
   let summaryCache = null;
   let mediaCache = null;
 
+  // The cookie holds an HMAC of the admin token, not the token itself, so a
+  // leaked cookie cannot be replayed as a Bearer credential against /admin.
+  const sessionCookieValue = env.adminToken
+    ? createHmac("sha256", env.adminToken).update("cta-dashboard-session").digest("hex")
+    : null;
+
   function authorized(req, url) {
-    if (!env.adminToken) return env.dryRun;
+    // fail closed: no token means no dashboard, dry-run included - the tunnel
+    // exposes this server to the internet before most people finish setup
+    if (!env.adminToken) return false;
     const bearer = String(req.headers.authorization || "");
     if (bearer.startsWith("Bearer ") && tokenMatches(bearer.slice(7), env.adminToken)) return true;
     if (tokenMatches(url.searchParams.get("token"), env.adminToken)) return true;
-    return tokenMatches(readCookie(req, COOKIE_NAME), env.adminToken);
+    return tokenMatches(readCookie(req, COOKIE_NAME), sessionCookieValue);
   }
 
   async function summary() {
@@ -267,8 +300,9 @@ export function createDashboard({ env, readStateEvents, loadRoutes, graphGet, pa
       // Landing with ?token= sets the cookie and cleans the URL so the token
       // does not linger in the address bar or browser history beyond this hop.
       if (url.searchParams.get("token")) {
+        const secure = req.headers["x-forwarded-proto"] === "https" ? "; Secure" : "";
         res.writeHead(302, {
-          "Set-Cookie": `${COOKIE_NAME}=${encodeURIComponent(env.adminToken)}; HttpOnly; SameSite=Strict; Path=/dashboard`,
+          "Set-Cookie": `${COOKIE_NAME}=${sessionCookieValue}; HttpOnly; SameSite=Strict; Path=/dashboard${secure}`,
           "Location": "/dashboard",
         });
         res.end();
@@ -347,6 +381,7 @@ const COPY = {
     hoursAgo: (n) => `לפני ${n} שע׳`,
     daysAgo: (n) => (n === 1 ? "אתמול" : `לפני ${n} ימים`),
     footer: "הדשבורד רץ אצלך על המחשב. הנתונים לא נשלחים לשום מקום",
+    sessionExpired: "החיבור פג. מריצים שוב npx instagram-cta dashboard",
     statusLabels: {
       sent: "מדריך נשלח בתגובה",
       message_sent_guide: "מדריך נשלח בהודעה",
@@ -398,6 +433,7 @@ const COPY = {
     hoursAgo: (n) => `${n}h ago`,
     daysAgo: (n) => (n === 1 ? "yesterday" : `${n}d ago`),
     footer: "This dashboard runs on your machine. Nothing is sent anywhere",
+    sessionExpired: "Session expired. Run npx instagram-cta dashboard again",
     statusLabels: {
       sent: "Guide sent via comment",
       message_sent_guide: "Guide sent via DM",
@@ -798,15 +834,17 @@ function renderRoutes(d){
 }
 
 function statusInfo(evt){
-  const s = evt.status;
-  if(s === "sent") return { cls:"good", label:C.statusLabels.sent };
-  if(s === "follow_gate_guide_sent") return { cls:"good", label:C.statusLabels.follow_gate_guide_sent };
-  if(s === "message_sent" && evt.funnel_event === "cta_guide_delivered") return { cls:"good", label:C.statusLabels.message_sent_guide };
-  if(s === "message_sent") return { cls:"info", label:C.statusLabels.message_sent };
-  if(s === "follow_gate_reminder_sent") return { cls:"info", label:C.statusLabels.follow_gate_reminder_sent };
-  if(s === "human_takeover_detected") return { cls:"mute", label:C.statusLabels.human_takeover_detected };
-  if(s.endsWith("_error")) return { cls:"bad", label:C.statusLabels.error };
-  return { cls:"mute", label:s };
+  if(evt.kind === "delivery"){
+    const label = evt.status === "message_sent" || evt.status === "dm_sent" ? C.statusLabels.message_sent_guide
+      : evt.status === "follow_gate_guide_sent" ? C.statusLabels.follow_gate_guide_sent
+      : C.statusLabels.sent;
+    return { cls:"good", label };
+  }
+  if(evt.kind === "conversation") return { cls:"info", label:C.statusLabels.message_sent };
+  if(evt.kind === "reminder") return { cls:"info", label:C.statusLabels.follow_gate_reminder_sent };
+  if(evt.kind === "takeover") return { cls:"mute", label:C.statusLabels.human_takeover_detected };
+  if(evt.kind === "error") return { cls:"bad", label:C.statusLabels.error };
+  return { cls:"mute", label:evt.status };
 }
 function renderFeed(d){
   const box = $("feed"); box.textContent = "";
@@ -969,6 +1007,7 @@ addEventListener("keydown",(e)=>{ if(e.key === "Escape") closeModal(); });
 async function refresh(){
   try{
     const res = await fetch("/dashboard/api/summary");
+    if(res.status === 401){ $("updated").textContent = C.sessionExpired; return; }
     if(!res.ok) return;
     DATA = await res.json();
     renderBadges(DATA); renderKpis(DATA); renderChart(DATA); renderRoutes(DATA); renderFeed(DATA);
