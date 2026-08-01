@@ -44,6 +44,7 @@ Usage:
   instagram-cta init [--dir PATH] [--provider hookmyapp|meta] [--locale en|he] [--mode polling|webhook]
   instagram-cta doctor [--dir PATH] [--live]
   instagram-cta route add KEYWORD URL --campaign-id ID [route options]
+  instagram-cta route remove KEYWORD [--media-id ID] [--all]
   instagram-cta routes validate [--dir PATH] [--check-guides]
   instagram-cta status [--dir PATH]
   instagram-cta recover [--dir PATH]
@@ -56,6 +57,7 @@ Examples:
   npx github:dangogit/instagram-cta-kit init --provider hookmyapp --locale en
   npx github:dangogit/instagram-cta-kit doctor
   npx github:dangogit/instagram-cta-kit route add CHECKLIST https://example.com/checklist --campaign-id first-checklist
+  npx github:dangogit/instagram-cta-kit route remove GUIDE
   npx github:dangogit/instagram-cta-kit status
   npx github:dangogit/instagram-cta-kit start
 `);
@@ -158,6 +160,7 @@ async function init() {
   await copyFile(resolve(packageRoot, "routes.example.json"), routesPath);
   await chmod(routesPath, 0o644);
   console.log(`Created Instagram CTA config in ${home}`);
+  console.log("routes.json holds two example routes (GUIDE and מדריך) that point at example.com. They are placeholders, so guide checks skip them. Replace their URLs or run instagram-cta route remove GUIDE");
   if (provider === "hookmyapp") {
     console.log("Next: connect Instagram with hookmyapp, write its channel env into .env, add WEBHOOK_HMAC_SECRET, then run instagram-cta doctor");
   } else {
@@ -261,6 +264,15 @@ async function doctor() {
   if (checks.some((check) => !check.ok)) process.exitCode = 1;
 }
 
+// spawnSync reports a missing cwd as a bare ENOENT, so check it first.
+async function ensureHome(home) {
+  try {
+    await access(home, constants.F_OK);
+  } catch {
+    fail(`${home} does not exist. Run instagram-cta init --dir ${home} first.`);
+  }
+}
+
 function runScript(relativePath, scriptArgs, home, extraEnv = {}) {
   return spawnSync(process.execPath, [resolve(packageRoot, relativePath), ...scriptArgs], {
     cwd: home,
@@ -274,12 +286,19 @@ function runScript(relativePath, scriptArgs, home, extraEnv = {}) {
   });
 }
 
+const ROUTE_SCRIPTS = {
+  add: "scripts/add-route.mjs",
+  remove: "scripts/remove-route.mjs",
+};
+
 async function route() {
   const subcommand = args.shift();
-  if (subcommand !== "add") fail("use: instagram-cta route add KEYWORD URL --campaign-id ID");
+  const script = ROUTE_SCRIPTS[subcommand];
+  if (!script) fail("use: instagram-cta route add KEYWORD URL --campaign-id ID, or instagram-cta route remove KEYWORD");
   const home = homeDir();
+  await ensureHome(home);
   await loadEnvFile(resolve(home, ".env"));
-  const result = runScript("scripts/add-route.mjs", args, home);
+  const result = runScript(script, args, home);
   if (result.error) fail(result.error.message);
   process.exitCode = result.status ?? 1;
 }
@@ -290,6 +309,7 @@ async function routes() {
   const home = homeDir();
   const checkGuides = flag("--check-guides");
   if (args.length) fail(`unknown arguments: ${args.join(" ")}`);
+  await ensureHome(home);
   await loadEnvFile(resolve(home, ".env"));
   const result = runScript("scripts/validate-routes.mjs", [], home, {
     CHECK_GUIDES: checkGuides ? "1" : "0",

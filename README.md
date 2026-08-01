@@ -76,7 +76,7 @@ hookmyapp channels webhook hmac show ch_YOUR_CHANNEL
 
 Put the HMAC value from the last command in `WEBHOOK_HMAC_SECRET` inside `./my-instagram-cta/.env`. Keep it private.
 
-Add a real guide route:
+Add a real guide route. Replace the URL with a page you actually publish, otherwise the guide check skips it as a placeholder:
 
 ```bash
 instagram-cta route add CHECKLIST https://example.com/checklist \
@@ -133,6 +133,7 @@ Add your app secret, account ID, and long-lived Instagram token to `.env`. Then 
 instagram-cta init [--provider hookmyapp|meta] [--locale en|he] [--mode polling|webhook]
 instagram-cta doctor [--live]
 instagram-cta route add KEYWORD URL --campaign-id ID
+instagram-cta route remove KEYWORD [--media-id ID] [--all]
 instagram-cta routes validate [--check-guides]
 instagram-cta status
 instagram-cta recover
@@ -163,6 +164,27 @@ instagram-cta route add CHECKLIST https://example.com/checklist \
 ```
 
 Follower checks run after a user comment, message, or button tap. Background follow delivery stays off by default.
+
+Remove a keyword you no longer use:
+
+```bash
+instagram-cta route remove GUIDE --dir ./my-instagram-cta
+```
+
+If one keyword serves two posts, pick which route to drop with `--media-id MEDIA_ID`, or remove both with `--all`.
+
+## Example routes
+
+`instagram-cta init` seeds two example routes, `GUIDE` and `מדריך`, so a fresh `routes.json` shows the shape of a route. Both point at `example.com`, which is a documentation domain that never resolves.
+
+`routes validate --check-guides` skips any route whose `guide_url` is on a reserved placeholder name (`example.com`, `example.net`, `example.org`, `.example`, `.invalid`, `.test`, `.localhost`) and reports how many it skipped. It does not report them as broken links. Every run also warns that the route is still a placeholder.
+
+Replace the URLs with your own guides, or delete the examples:
+
+```bash
+instagram-cta route remove GUIDE --dir ./my-instagram-cta
+instagram-cta route remove מדריך --dir ./my-instagram-cta
+```
 
 ## Recovery
 

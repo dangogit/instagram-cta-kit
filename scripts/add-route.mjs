@@ -6,6 +6,11 @@ const args = process.argv.slice(2);
 const keywordArg = args.shift();
 const guideUrl = args.shift();
 
+function fail(message) {
+  console.error(message);
+  process.exit(1);
+}
+
 function usage() {
   console.error(`Usage:
   npm run add:route -- KEYWORD https://example.com/guides/slug --campaign-id YYYY-MM-DD-asset-slug [--media-id MEDIA_ID]
@@ -73,13 +78,13 @@ function validHttpsUrl(value) {
 if (!keywordArg || !guideUrl) usage();
 
 const keyword = normalizeKeyword(keywordArg);
-if (!/^[A-Z0-9\u0590-\u05ff]{2,30}$/.test(keyword)) throw new Error(`Bad keyword: ${keywordArg}`);
-if (!validHttpsUrl(guideUrl)) throw new Error("Guide URL must be a valid https URL without embedded credentials");
+if (!/^[A-Z0-9\u0590-\u05ff]{2,30}$/.test(keyword)) fail(`Bad keyword: ${keywordArg}`);
+if (!validHttpsUrl(guideUrl)) fail("Guide URL must be a valid https URL without embedded credentials");
 
 const campaignId = String(takeFlag("--campaign-id") || "").trim().toLowerCase();
-if (!/^[a-z0-9][a-z0-9._-]{1,99}$/.test(campaignId)) throw new Error("--campaign-id is required and must be a stable asset slug");
+if (!/^[a-z0-9][a-z0-9._-]{1,99}$/.test(campaignId)) fail("--campaign-id is required and must be a stable asset slug");
 const locale = String(takeFlag("--locale") || process.env.DEFAULT_LOCALE || "en").toLowerCase();
-if (!["en", "he"].includes(locale)) throw new Error("--locale must be en or he");
+if (!["en", "he"].includes(locale)) fail("--locale must be en or he");
 const defaults = locale === "he" ? {
   intro: `קיבלתי את התגובה על ${keyword}. לשלוח את המדריך?`,
   guide: `הנה המדריך:\n${guideUrl}\n\nאשמח לשמוע אם הוא עזר.`,
@@ -104,8 +109,14 @@ const followGate = hasFlag("--follow-gate");
 if (args.length) usage();
 
 const routesFile = resolve(process.cwd(), process.env.ROUTES_FILE || "./routes.json");
-const raw = await readFile(routesFile, "utf8");
-const parsed = JSON.parse(raw);
+let parsed;
+try {
+  parsed = JSON.parse(await readFile(routesFile, "utf8"));
+} catch (error) {
+  if (error.code === "ENOENT") fail(`routes file not found: ${routesFile}\nRun instagram-cta init first, or pass --dir with the folder that holds routes.json.`);
+  if (error instanceof SyntaxError) fail(`routes file is not valid JSON: ${routesFile}\n${error.message}`);
+  fail(`routes file could not be read: ${routesFile}\n${error.message}`);
+}
 if (!Array.isArray(parsed.routes)) parsed.routes = [];
 
 for (const route of parsed.routes) {
@@ -114,7 +125,7 @@ for (const route of parsed.routes) {
   if (!existingKeywords.includes(keyword)) continue;
   const existingMediaIds = routeMediaIds(route);
   if (existingMediaIds.length === 0 || mediaIds.length === 0 || intersects(existingMediaIds, mediaIds)) {
-    throw new Error(`${keyword} already exists. Use media_ids only for non-overlapping post-specific routes.`);
+    fail(`${keyword} already exists. Use media_ids only for non-overlapping post-specific routes.\nRemove it first with: instagram-cta route remove ${keyword}`);
   }
 }
 

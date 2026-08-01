@@ -51,6 +51,8 @@ The second command prints the signing secret. Save it as `WEBHOOK_HMAC_SECRET` i
 
 ## 4. Add and validate a route
 
+Point the route at a guide page you actually publish. A URL on `example.com` is a placeholder, and the guide check skips it instead of testing it.
+
 ```bash
 instagram-cta route add CHECKLIST https://example.com/checklist \
   --dir ./my-instagram-cta \
@@ -58,6 +60,13 @@ instagram-cta route add CHECKLIST https://example.com/checklist \
 
 instagram-cta doctor --dir ./my-instagram-cta --live
 instagram-cta routes validate --dir ./my-instagram-cta --check-guides
+```
+
+`init` also seeds two example routes, `GUIDE` and `מדריך`. They are placeholders on `example.com`, so the guide check reports them as skipped. Remove them once your own keyword works:
+
+```bash
+instagram-cta route remove GUIDE --dir ./my-instagram-cta
+instagram-cta route remove מדריך --dir ./my-instagram-cta
 ```
 
 Keep `DRY_RUN=1`.

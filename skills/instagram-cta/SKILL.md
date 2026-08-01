@@ -36,9 +36,13 @@ instagram-cta doctor --dir ./instagram-cta --live
 instagram-cta route add CHECKLIST https://example.com/checklist \
   --dir ./instagram-cta \
   --campaign-id stable-content-slug
+instagram-cta route remove GUIDE --dir ./instagram-cta
+instagram-cta route remove מדריך --dir ./instagram-cta
 instagram-cta routes validate --dir ./instagram-cta --check-guides
 instagram-cta start --dir ./instagram-cta
 ```
+
+`GUIDE` and `מדריך` are the example routes seeded by `init`. They point at `example.com`, so `--check-guides` skips them rather than reporting broken links. Remove them or repoint them at a real guide.
 
 Use `hookmyapp channels listen` for local webhook testing. Use a permanent HookMyApp webhook URL for a server.
 
