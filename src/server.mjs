@@ -6,6 +6,11 @@ import http from "node:http";
 import { createDurableInbox } from "./durable-inbox.mjs";
 import { createRecoveryWorker } from "./recovery-worker.mjs";
 import { verifyWebhookSignature } from "./webhook-signature.mjs";
+import { createDashboard } from "./dashboard.mjs";
+
+const packageVersion = JSON.parse(
+  await readFile(new URL("../package.json", import.meta.url), "utf8"),
+).version;
 
 const homeDir = resolve(process.env.INSTAGRAM_CTA_HOME || process.cwd());
 const locale = process.env.DEFAULT_LOCALE === "he" ? "he" : "en";
@@ -1728,6 +1733,15 @@ async function handleAdmin(req, res, url) {
   sendJson(res, 404, { ok: false, error: "unknown admin action" });
 }
 
+const dashboard = createDashboard({
+  env,
+  readStateEvents,
+  loadRoutes,
+  graphGet,
+  packageVersion,
+  locale,
+});
+
 export function createServer() {
   assertConfig();
   return http.createServer(async (req, res) => {
@@ -1735,6 +1749,9 @@ export function createServer() {
       const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
       if (req.method === "GET" && url.pathname === "/webhook") return handleVerify(req, res, url);
       if (req.method === "POST" && url.pathname === "/webhook") return await handlePost(req, res);
+      if (url.pathname === "/dashboard" || url.pathname.startsWith("/dashboard/")) {
+        return await dashboard.handle(req, res, url);
+      }
       if (url.pathname.startsWith("/admin/")) return await handleAdmin(req, res, url);
       if (req.method === "GET" && url.pathname === "/health") {
         const deliveryErrors = summarizeRecentDeliveryErrors(await readStateEvents());

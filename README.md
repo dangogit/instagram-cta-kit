@@ -136,6 +136,7 @@ instagram-cta route add KEYWORD URL --campaign-id ID
 instagram-cta route remove KEYWORD [--media-id ID] [--all]
 instagram-cta routes validate [--check-guides]
 instagram-cta status
+instagram-cta dashboard [--no-open]
 instagram-cta recover
 instagram-cta dead-letter list
 instagram-cta dead-letter retry EVENT_KEY
@@ -172,6 +173,29 @@ instagram-cta route remove GUIDE --dir ./my-instagram-cta
 ```
 
 If one keyword serves two posts, pick which route to drop with `--media-id MEDIA_ID`, or remove both with `--all`.
+
+## Dashboard
+
+The kit ships with a built-in web dashboard. With the server running:
+
+```bash
+npx instagram-cta dashboard
+```
+
+This prints a tokenized link and opens it in your browser. You get:
+
+- Delivery totals: all time, last 7 days, today, plus errors in the last 24 hours.
+- A 14-day chart of guides delivered.
+- Every active automation with its keyword, guide URL, delivery count, and last send.
+- Click an automation to see the actual Instagram post it is attached to, rendered
+  in a phone frame (via Instagram's embed endpoint), with per-post delivery counts.
+- A live activity feed: guides sent, conversations opened, follow reminders, errors.
+
+The dashboard follows `DEFAULT_LOCALE` (Hebrew RTL or English) and is protected by
+`CTA_ADMIN_TOKEN` - important because webhook tunnels expose the whole server to the
+internet. Without a valid token every dashboard route returns 401. All data is read
+from your local `routes.json` and `state/events.jsonl`; nothing leaves your machine
+except the post metadata fetch to the Instagram API you already configured.
 
 ## Example routes
 
