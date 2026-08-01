@@ -467,8 +467,11 @@ header.top{display:flex;align-items:center;justify-content:space-between;gap:16p
 .kpi.hero{background:linear-gradient(145deg,#241d19,#1c1b19);border-color:rgba(217,119,87,.35)}
 .kpi.hero .value{color:var(--accent);font-size:40px}
 .kpi .spark{position:absolute;inset-inline-end:16px;top:18px;opacity:.9}
-.grid{display:grid;grid-template-columns:1fr 340px;gap:14px;align-items:start}
-@media(max-width:900px){.grid{grid-template-columns:1fr}}
+.grid{display:grid;grid-template-columns:1fr 340px;gap:14px;align-items:stretch}
+.grid>.card{display:flex;flex-direction:column}
+.grid>.card .feed{flex:1}
+.grid>div>.card:last-child{flex:1}
+@media(max-width:900px){.grid{grid-template-columns:1fr}.grid>.card,.grid>div>.card:last-child{flex:none;display:block}}
 .card{background:var(--card);border:1px solid var(--border);border-radius:18px;padding:22px}
 .card h2{font-size:14.5px;margin:0 0 4px;display:flex;align-items:center;gap:8px}
 .card .hint{font-size:12px;color:var(--faint);margin-bottom:16px}
@@ -504,6 +507,7 @@ details.tbl td,details.tbl th{padding:5px 8px;border-bottom:1px solid var(--bord
 .evt .dot.good{background:var(--good)}.evt .dot.bad{background:var(--bad)}.evt .dot.info{background:var(--blue)}.evt .dot.mute{background:var(--faint)}
 .evt .what{flex:1;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pager{display:flex;align-items:center;justify-content:center;gap:12px;margin-top:14px}
+.feed .pager{margin-top:auto;padding-top:14px}
 .pager button{background:var(--card2);border:1px solid var(--border);color:var(--muted);width:30px;height:30px;border-radius:9px;cursor:pointer;font-size:15px;line-height:1}
 .pager button:hover:not(:disabled){border-color:var(--border2);color:var(--ink)}
 .pager button:disabled{opacity:.3;cursor:default}
