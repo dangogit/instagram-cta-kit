@@ -47,6 +47,7 @@ Usage:
   instagram-cta route remove KEYWORD [--media-id ID] [--all]
   instagram-cta routes validate [--dir PATH] [--check-guides]
   instagram-cta status [--dir PATH]
+  instagram-cta dashboard [--dir PATH] [--no-open]
   instagram-cta recover [--dir PATH]
   instagram-cta dead-letter list [--dir PATH]
   instagram-cta dead-letter retry EVENT_KEY [--dir PATH]
@@ -366,6 +367,27 @@ async function status() {
   if (data.ok === false) process.exitCode = 1;
 }
 
+async function dashboard() {
+  const home = homeDir();
+  const noOpen = flag("--no-open");
+  if (args.length) fail(`unknown arguments: ${args.join(" ")}`);
+  const runtime = await loadRuntime(home);
+  if (isPlaceholder(runtime.token)) {
+    fail("CTA_ADMIN_TOKEN is missing - run instagram-cta init first");
+  }
+  const url = `${runtime.base}/dashboard?token=${encodeURIComponent(runtime.token)}`;
+  console.log(url);
+  if (!noOpen) {
+    const opener = process.platform === "darwin"
+      ? "open"
+      : process.platform === "win32" ? "start" : "xdg-open";
+    spawnSync(opener, [url], {
+      stdio: "ignore",
+      shell: process.platform === "win32",
+    });
+  }
+}
+
 async function recover() {
   await requestRuntime("/admin/recover", { method: "POST", admin: true });
 }
@@ -415,6 +437,7 @@ switch (command) {
   case "route": await route(); break;
   case "routes": await routes(); break;
   case "status": await status(); break;
+  case "dashboard": await dashboard(); break;
   case "recover": await recover(); break;
   case "dead-letter": await deadLetter(); break;
   case "start": await start(); break;
